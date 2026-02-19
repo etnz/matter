@@ -57,10 +57,52 @@ func TestPhase1_PingPong(t *testing.T) {
 	}
 }
 
+func TestPhase2_MRP_Ack(t *testing.T) {
+	network := newMockNetwork()
+
+	// 1. Setup Server
+	serverAddr := "server:5540"
+	serverConn := network.listenPacket(serverAddr)
+	mux := NewServeMux()
+	mux.HandleFunc(0, 0xFE, func(ctx *ExchangeContext) {
+		// Handler replies PONG
+		if _, err := ctx.Response(0, 0xFF, []byte("PONG")); err != nil {
+			t.Errorf("failed to respond: %v", err)
+		}
+	})
+
+	server := &Server{Handler: mux}
+	go server.Serve(serverConn)
+	defer server.Shutdown(context.Background())
+
+	// 2. Manual Client to verify ACK bit
+	clientConn := network.listenPacket("client:manual")
+
+	// Send "PING" with Reliable Flag (0x10)
+	reqProto := ProtocolMessageHeader{
+		ExchangeFlags: FlagReliable,
+		Opcode:        0xFE,
+		ProtocolId:    0,
+	}
+	var b bytes.Buffer
+	reqProto.Encode(&b)
+	b.Write([]byte("PING"))
+	clientConn.WriteTo(b.Bytes(), &mockAddr{serverAddr})
+
+	// Read Response
+	buf := make([]byte, 1024)
+	n, _, _ := clientConn.ReadFrom(buf)
+	respProto, _ := decodeProtocolMessageHeader(buf[:n])
+
+	if (respProto.ExchangeFlags & FlagAck) == 0 {
+		t.Errorf("expected ACK flag to be set in response, got flags: %x", respProto.ExchangeFlags)
+	}
+}
+
 // --- Mock Transport Implementation ---
 
 type packet struct {
-	from net.Addr
+	addr net.Addr
 	data []byte
 }
 
@@ -93,7 +135,7 @@ func (c *MockPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 			return 0, nil, net.ErrClosed
 		}
 		n = copy(p, pkt.data)
-		return n, pkt.from, nil
+		return n, pkt.addr, nil
 	case <-timeout:
 		return 0, nil, &net.OpError{Op: "read", Net: "udp", Err: context.DeadlineExceeded}
 	}
@@ -167,7 +209,7 @@ func (n *mockNetwork) route(from, to net.Addr, data []byte) {
 	if target, ok := n.conns[to.String()]; ok {
 		// Non-blocking send to avoid deadlocks
 		select {
-		case target.readCh <- packet{from: from, data: data}:
+		case target.readCh <- packet{addr: from, data: data}:
 		default:
 		}
 	}

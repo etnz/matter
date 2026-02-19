@@ -3,6 +3,7 @@ package matter
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"sync"
 
@@ -22,30 +23,33 @@ func (f HandlerFunc) Serve(ctx *ExchangeContext) {
 	f(ctx)
 }
 
+// ExchangeContext is the thin layer to expose the Response() method
+
 // ExchangeContext holds the context for the current exchange.
 // It provides access to the incoming request and a way to send a response.
 type ExchangeContext struct {
-	context.Context
-	conn                  net.PacketConn
-	RemoteAddr            net.Addr
-	ProtocolMessageHeader ProtocolMessageHeader
-	Payload               []byte
-}
-
-// send
-func (c *ExchangeContext) send(proto ProtocolMessageHeader, payload []byte) (int, error) {
-	return c.conn.WriteTo(encodeProtocolMessageHeader(proto, payload), c.RemoteAddr)
+	exchange
+	//ctx  context.Context
+	conn net.PacketConn
 }
 
 // Response sends data back to the remote peer.
 func (c *ExchangeContext) Response(proto gomat.ProtocolId, opcode gomat.Opcode, payload []byte) (int, error) {
-	// TODO layer 2 parameters
-	p := ProtocolMessageHeader{
-		ExchangeFlags: 0,
-		Opcode:        opcode,
-		ProtocolId:    proto,
+	// TODO use the request's exchange context to create an appropriate response context.
+	resp := exchange{
+		RemoteAddr: c.RemoteAddr,
+		ProtocolMessageHeader: ProtocolMessageHeader{
+			ExchangeFlags: FlagAck,
+			Opcode:        opcode,
+			ProtocolId:    proto,
+			ExchangeID:    c.ProtocolMessageHeader.ExchangeID,
+		},
+		Payload:  payload,
+		reliable: c.reliable,
 	}
-	return c.send(p, payload)
+	// TODO: Support piggybacking in the future.
+	// For now, we assume the request was already ACKed by the infrastructure (Serve loop).
+	return resp.writeTo(c.conn)
 }
 
 // Server defines parameters for running a Matter server.
@@ -100,17 +104,32 @@ func (s *Server) Serve(pc net.PacketConn) error {
 
 		proto, payload := decodeProtocolMessageHeader(buf[:n])
 
-		ctx := context.Background()
-		if s.BaseContext != nil {
-			ctx = s.BaseContext(addr)
-		}
+		// ctx := context.Background()
+		// if s.BaseContext != nil {
+		// 	ctx = s.BaseContext(addr)
+		// }
 
 		exch := &ExchangeContext{
-			Context:               ctx,
-			conn:                  pc,
-			RemoteAddr:            addr,
-			ProtocolMessageHeader: proto,
-			Payload:               payload,
+			//ctx:  ctx,
+			conn: pc,
+			exchange: exchange{
+				RemoteAddr:            addr,
+				ProtocolMessageHeader: proto,
+				Payload:               payload,
+				reliable:              (proto.ExchangeFlags & FlagReliable) != 0,
+			},
+		}
+
+		// Handle MRP: Send Standalone ACK if reliable
+		if exch.reliable {
+			// TODO: Support piggybacking in the future.
+			// For now, send Standalone ACK immediately.
+			ack := exch.ack(proto.ExchangeID)
+
+			if _, err := ack.writeTo(exch.conn); err != nil {
+				// Matter Spec 4.11.8: Standalone Acknowledgements SHALL NOT be retransmitted.
+				log.Printf("failed to ack: %v\n", err)
+			}
 		}
 
 		handler := s.Handler
