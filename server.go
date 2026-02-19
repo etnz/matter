@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"sync"
+
+	"github.com/tom-code/gomat"
 )
 
 // Handler responds to an incoming Matter request.
@@ -24,14 +26,26 @@ func (f HandlerFunc) Serve(ctx *ExchangeContext) {
 // It provides access to the incoming request and a way to send a response.
 type ExchangeContext struct {
 	context.Context
-	conn       net.PacketConn
-	RemoteAddr net.Addr
-	Request    []byte
+	conn                  net.PacketConn
+	RemoteAddr            net.Addr
+	ProtocolMessageHeader ProtocolMessageHeader
+	Payload               []byte
+}
+
+// send
+func (c *ExchangeContext) send(proto ProtocolMessageHeader, payload []byte) (int, error) {
+	return c.conn.WriteTo(encodeProtocolMessageHeader(proto, payload), c.RemoteAddr)
 }
 
 // Response sends data back to the remote peer.
-func (c *ExchangeContext) Response(data []byte) (int, error) {
-	return c.conn.WriteTo(data, c.RemoteAddr)
+func (c *ExchangeContext) Response(proto gomat.ProtocolId, opcode gomat.Opcode, payload []byte) (int, error) {
+	// TODO layer 2 parameters
+	p := ProtocolMessageHeader{
+		ExchangeFlags: 0,
+		Opcode:        opcode,
+		ProtocolId:    proto,
+	}
+	return c.send(p, payload)
 }
 
 // Server defines parameters for running a Matter server.
@@ -84,9 +98,7 @@ func (s *Server) Serve(pc net.PacketConn) error {
 			return err
 		}
 
-		// Copy payload as buf is reused
-		payload := make([]byte, n)
-		copy(payload, buf[:n])
+		proto, payload := decodeProtocolMessageHeader(buf[:n])
 
 		ctx := context.Background()
 		if s.BaseContext != nil {
@@ -94,10 +106,11 @@ func (s *Server) Serve(pc net.PacketConn) error {
 		}
 
 		exch := &ExchangeContext{
-			Context:    ctx,
-			conn:       pc,
-			RemoteAddr: addr,
-			Request:    payload,
+			Context:               ctx,
+			conn:                  pc,
+			RemoteAddr:            addr,
+			ProtocolMessageHeader: proto,
+			Payload:               payload,
 		}
 
 		handler := s.Handler

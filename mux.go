@@ -1,38 +1,39 @@
 package matter
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/tom-code/gomat"
+)
 
 // ServeMux is a simple request multiplexer.
-// It matches the incoming message (as a string) against a list of registered patterns.
+// It matches the incoming message against a list of registered patterns.
 type ServeMux struct {
 	mu sync.RWMutex
-	m  map[string]Handler
+	m  map[gomat.ProtocolId]map[gomat.Opcode]Handler
 }
 
 // NewServeMux allocates and returns a new ServeMux.
 func NewServeMux() *ServeMux {
-	return &ServeMux{m: make(map[string]Handler)}
+	return &ServeMux{m: make(map[gomat.ProtocolId]map[gomat.Opcode]Handler)}
 }
 
 // Handle registers the handler for the given pattern.
-func (mux *ServeMux) Handle(pattern string, handler Handler) {
+func (mux *ServeMux) Handle(proto gomat.ProtocolId, opcode gomat.Opcode, handler Handler) {
 	mux.mu.Lock()
 	defer mux.mu.Unlock()
-	if pattern == "" {
-		panic("matter: invalid pattern")
-	}
 	if handler == nil {
 		panic("matter: nil handler")
 	}
-	if _, exist := mux.m[pattern]; exist {
-		panic("matter: multiple registrations for " + pattern)
+	if mux.m[proto] == nil {
+		mux.m[proto] = make(map[gomat.Opcode]Handler)
 	}
-	mux.m[pattern] = handler
+	mux.m[proto][opcode] = handler
 }
 
 // HandleFunc registers the handler function for the given pattern.
-func (mux *ServeMux) HandleFunc(pattern string, handler func(*ExchangeContext)) {
-	mux.Handle(pattern, HandlerFunc(handler))
+func (mux *ServeMux) HandleFunc(proto gomat.ProtocolId, opcode gomat.Opcode, handler func(*ExchangeContext)) {
+	mux.Handle(proto, opcode, HandlerFunc(handler))
 }
 
 // Serve dispatches the request to the handler whose pattern matches the request message.
@@ -40,10 +41,10 @@ func (mux *ServeMux) Serve(ctx *ExchangeContext) {
 	mux.mu.RLock()
 	defer mux.mu.RUnlock()
 
-	// Phase 1: Simple exact string matching
-	reqStr := string(ctx.Request)
-	if h, ok := mux.m[reqStr]; ok {
-		h.Serve(ctx)
+	if ops, ok := mux.m[ctx.ProtocolMessageHeader.ProtocolId]; ok {
+		if h, ok := ops[ctx.ProtocolMessageHeader.Opcode]; ok {
+			h.Serve(ctx)
+		}
 	}
 	// TODO: Handle 404 / Unknown command
 }

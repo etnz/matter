@@ -1,0 +1,4 @@
+github.com/tom-code/gomat v0.0.0-20231210134906-5413b3e13054 h1:+MMrzc6oLOvnCmG60XkWTUwUejzIfZvfNEzBOth/adc=
+github.com/tom-code/gomat v0.0.0-20231210134906-5413b3e13054/go.mod h1:emj5ejTh9ctVZmkrAMGEuh7WFwSpOHCGNNGpl8nfWZE=
+golang.org/x/crypto v0.13.0 h1:mvySKfSWJ+UKUii46M40LOvyWfN0s2U+46/jDd0e6Ck=
+golang.org/x/crypto v0.13.0/go.mod h1:y6Z2r+Rw4iayiXXAIxJIDAJ1zMW4yaTpebo8fPOliYc=

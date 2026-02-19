@@ -18,9 +18,9 @@ func TestPhase1_PingPong(t *testing.T) {
 	serverAddr := "server:5540"
 	serverConn := network.listenPacket(serverAddr)
 	mux := NewServeMux()
-	mux.HandleFunc("PING", func(ctx *ExchangeContext) {
+	mux.HandleFunc(0, 0xFE, func(ctx *ExchangeContext) {
 		// Handler replies PONG
-		if _, err := ctx.Response([]byte("PONG")); err != nil {
+		if _, err := ctx.Response(0, 0xFF, []byte("PONG")); err != nil {
 			t.Errorf("failed to respond: %v", err)
 		}
 	})
@@ -47,7 +47,7 @@ func TestPhase1_PingPong(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	resp, err := client.Send(ctx, &mockAddr{serverAddr}, []byte("PING"))
+	_, _, resp, err := client.Request(ctx, &mockAddr{serverAddr}, 0, 0xFE, []byte("PING"))
 	if err != nil {
 		t.Fatalf("client send failed: %v", err)
 	}
