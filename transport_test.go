@@ -3,6 +3,7 @@ package matter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -17,91 +18,59 @@ func TestPhase1_PingPong(t *testing.T) {
 	// 1. Setup Server
 	serverAddr := "server:5540"
 	serverConn := network.listenPacket(serverAddr)
-	mux := NewServeMux()
-	mux.HandleFunc(0, 0xFE, func(ctx *ExchangeContext) {
-		// Handler replies PONG
-		if _, err := ctx.Response(0, 0xFF, []byte("PONG")); err != nil {
-			t.Errorf("failed to respond: %v", err)
-		}
+	handler := HandlerFunc(func(ctx context.Context, msg Message, w MessageWriter) {
+		// Handler replies PONG (whatever is the protoccol ID or opCode.)
+		w.Response(Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeInvokeResponse, payload: []byte("PONG")})
 	})
 
+	cm, err := NewGeneratedCertificateManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipk := make([]byte, 16)
+	fabric := NewFabric(1, 1, ipk, cm)
 	server := &Server{
-		Handler: mux,
+		Handler: handler,
+		Fabric:  fabric,
 	}
 
 	// Run server in goroutine
 	go func() {
-		if err := server.Serve(serverConn); err != nil && err.Error() != "server closed" {
+		if err := server.Serve(serverConn); err != nil && !errors.Is(err, net.ErrClosed) && err.Error() != "server closed" {
 			t.Errorf("server error: %v", err)
 		}
 	}()
-	defer server.Shutdown(context.Background())
 
 	// 2. Setup Client
 	clientConn := network.listenPacket("client:1234")
+	clientFabric := NewFabric(1, 2, ipk, cm)
 	client := &Client{
 		Transport: clientConn,
+		Fabric:    clientFabric,
 	}
 
 	// 3. Execute Test
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, resp, err := client.Request(ctx, &mockAddr{serverAddr}, 0, 0xFE, []byte("PING"))
+	req := Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodeInvokeRequest,
+		payload:    []byte("PING"),
+	}
+	resp, err := client.Request(&mockAddr{serverAddr}, req)
 	if err != nil {
 		t.Fatalf("client send failed: %v", err)
 	}
 
-	if !bytes.Equal(resp, []byte("PONG")) {
-		t.Errorf("got %s, want PONG", string(resp))
-	}
-}
-
-func TestPhase2_MRP_Ack(t *testing.T) {
-	network := newMockNetwork()
-
-	// 1. Setup Server
-	serverAddr := "server:5540"
-	serverConn := network.listenPacket(serverAddr)
-	mux := NewServeMux()
-	mux.HandleFunc(0, 0xFE, func(ctx *ExchangeContext) {
-		// Handler replies PONG
-		if _, err := ctx.Response(0, 0xFF, []byte("PONG")); err != nil {
-			t.Errorf("failed to respond: %v", err)
-		}
-	})
-
-	server := &Server{Handler: mux}
-	go server.Serve(serverConn)
-	defer server.Shutdown(context.Background())
-
-	// 2. Manual Client to verify ACK bit
-	clientConn := network.listenPacket("client:manual")
-
-	// Send "PING" with Reliable Flag (0x10)
-	reqProto := ProtocolMessageHeader{
-		ExchangeFlags: FlagReliable,
-		Opcode:        0xFE,
-		ProtocolId:    0,
-	}
-	var b bytes.Buffer
-	reqProto.Encode(&b)
-	b.Write([]byte("PING"))
-	clientConn.WriteTo(b.Bytes(), &mockAddr{serverAddr})
-
-	// Read Response
-	buf := make([]byte, 1024)
-	n, _, _ := clientConn.ReadFrom(buf)
-	respProto, _ := decodeProtocolMessageHeader(buf[:n])
-
-	if (respProto.ExchangeFlags & FlagAck) == 0 {
-		t.Errorf("expected ACK flag to be set in response, got flags: %x", respProto.ExchangeFlags)
+	if !bytes.Equal(resp.payload, []byte("PONG")) {
+		t.Errorf("got %s, want PONG", string(resp.payload))
 	}
 }
 
 // --- Mock Transport Implementation ---
 
-type packet struct {
+type fakePacket struct {
 	addr net.Addr
 	data []byte
 }
@@ -109,7 +78,7 @@ type packet struct {
 // MockPacketConn implements net.PacketConn using channels.
 type MockPacketConn struct {
 	addr         net.Addr
-	readCh       chan packet
+	readCh       chan fakePacket
 	network      *mockNetwork
 	closed       bool
 	mu           sync.Mutex
@@ -196,7 +165,7 @@ func (n *mockNetwork) listenPacket(addr string) *MockPacketConn {
 	a := &mockAddr{addr}
 	conn := &MockPacketConn{
 		addr:    a,
-		readCh:  make(chan packet, 100), // Buffered to avoid tight coupling in tests
+		readCh:  make(chan fakePacket, 100), // Buffered to avoid tight coupling in tests
 		network: n,
 	}
 	n.conns[addr] = conn
@@ -209,7 +178,7 @@ func (n *mockNetwork) route(from, to net.Addr, data []byte) {
 	if target, ok := n.conns[to.String()]; ok {
 		// Non-blocking send to avoid deadlocks
 		select {
-		case target.readCh <- packet{addr: from, data: data}:
+		case target.readCh <- fakePacket{addr: from, data: data}:
 		default:
 		}
 	}

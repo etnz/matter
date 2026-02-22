@@ -1,59 +1,47 @@
 package matter
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"log"
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
+	"log/slog"
 	"net"
+	"os"
 	"sync"
-
-	"github.com/tom-code/gomat"
 )
+
+// temporary hack to tune the verbosity level of the the server.
+var serverNetworkLevel = slog.LevelWarn
+
+// MessageWriter allows the handler to write a response.
+type MessageWriter interface {
+	Response(Message)
+}
 
 // Handler responds to an incoming Matter request.
 type Handler interface {
-	Serve(ctx *ExchangeContext)
+	Serve(ctx context.Context, msg Message, w MessageWriter)
 }
 
 // HandlerFunc is an adapter to allow the use of ordinary functions as Matter handlers.
-type HandlerFunc func(ctx *ExchangeContext)
+type HandlerFunc func(ctx context.Context, msg Message, w MessageWriter)
 
 // Serve calls f(ctx).
-func (f HandlerFunc) Serve(ctx *ExchangeContext) {
-	f(ctx)
+func (f HandlerFunc) Serve(ctx context.Context, msg Message, w MessageWriter) {
+	f(ctx, msg, w)
 }
 
-// ExchangeContext is the thin layer to expose the Response() method
+// responseWriter implements MessageWriter and sends the response back to the connection loop.
+type responseWriter Message
 
-// ExchangeContext holds the context for the current exchange.
-// It provides access to the incoming request and a way to send a response.
-type ExchangeContext struct {
-	exchange
-	//ctx  context.Context
-	conn net.PacketConn
-}
-
-// Response sends data back to the remote peer.
-func (c *ExchangeContext) Response(proto gomat.ProtocolId, opcode gomat.Opcode, payload []byte) (int, error) {
-	// TODO use the request's exchange context to create an appropriate response context.
-	resp := exchange{
-		RemoteAddr: c.RemoteAddr,
-		ProtocolMessageHeader: ProtocolMessageHeader{
-			ExchangeFlags: FlagAck,
-			Opcode:        opcode,
-			ProtocolId:    proto,
-			ExchangeID:    c.ProtocolMessageHeader.ExchangeID,
-		},
-		Payload:  payload,
-		reliable: c.reliable,
-	}
-	// TODO: Support piggybacking in the future.
-	// For now, we assume the request was already ACKed by the infrastructure (Serve loop).
-	return resp.writeTo(c.conn)
-}
+func (w *responseWriter) Response(msg Message) { *w = responseWriter(msg) }
 
 // Server defines parameters for running a Matter server.
 type Server struct {
+	network
+
 	// Addr optionally specifies the UDP address for the server to listen on,
 	// in the form "host:port". If empty, ":5540" (standard Matter port) is used.
 	Addr string
@@ -64,14 +52,16 @@ type Server struct {
 	// BaseContext optionally specifies a function that returns the base context
 	// for incoming requests on this server.
 	BaseContext func(net.Addr) context.Context
+	Fabric      *Fabric
 
-	mu         sync.Mutex
-	activeConn map[net.PacketConn]struct{}
-	inShutdown bool
+	// shutdown chan struct{}
+	initOnce sync.Once
+	sessions sync.Map
 }
 
 // ListenAndServe listens on the UDP network address s.Addr and then calls Serve.
 func (s *Server) ListenAndServe() error {
+	s.init()
 	addr := s.Addr
 	if addr == "" {
 		addr = ":5540"
@@ -83,96 +73,269 @@ func (s *Server) ListenAndServe() error {
 	return s.Serve(conn)
 }
 
-// Serve accepts incoming packets on the PacketConn and creates a new service goroutine for each.
-func (s *Server) Serve(pc net.PacketConn) error {
-	s.trackConn(pc, true)
-	defer s.trackConn(pc, false)
+func (s *Server) init() {
+	s.initOnce.Do(func() {
+		s.network.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: serverNetworkLevel,
+		})).With("agent", "server")
 
-	buf := make([]byte, 4096) // Standard MTU safe buffer
-	for {
-		if s.shuttingDown() {
-			return errors.New("server closed")
+		// connection are passed to the shutdown goroutine that receives conn to remember and a shutdown pill.
+		// s.shutdown = make(chan struct{})
+
+		if s.Fabric == nil {
+			panic("server requires a fabric")
+		}
+	})
+}
+
+// Serve accepts incoming packets on the PacketConn and creates a new service goroutine for each.
+func (s *Server) Serve(pc net.PacketConn) (err error) {
+	// Ensure that everything is ready.
+	s.init()
+
+	conn := s.network.new(pc)
+	defer conn.close()
+
+	for msg := range conn.inbound {
+		// Build a Response to this Request, using the Handler.
+		go s.handle(msg, conn.outbound)
+
+	}
+	return nil
+}
+
+func (s *Server) handle(msg packet, outbound chan<- packet) {
+	// create a context and a go routine per request to build Response.
+	var ctx context.Context
+	if s.BaseContext != nil {
+		ctx = s.BaseContext(msg.addr)
+	} else {
+		ctx = context.Background()
+	}
+
+	// execute the inbound flow to parse the message and build a MatterMessage.
+	if err := s.inboundFlow(ctx, &msg); err != nil {
+		s.network.logger.Warn("failed to process inbound message", "error", err)
+		return
+	}
+
+	// Delegate to the Handler to build an Application Response.
+	var response Message
+
+	var handled bool
+	if msg.protocolHeader.ProtocolId == ProtocolIDSecureChannel {
+		switch msg.protocolHeader.Opcode {
+		case OpCodeCASESigma1:
+			var err error
+			response, err = s.handleSigma1(&msg)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Sigma1", "error", err)
+				return
+			}
+			handled = true
+		case OpCodeCASESigma3:
+			var err error
+			response, err = s.handleSigma3(&msg)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Sigma3", "error", err)
+				return
+			}
+			handled = true
+		}
+	}
+	if !handled {
+		s.Handler.Serve(ctx, Message{
+			ProtocolID: msg.protocolHeader.ProtocolId,
+			OpCode:     msg.protocolHeader.Opcode,
+			payload:    msg.payload,
+		}, (*responseWriter)(&response))
+	}
+
+	// response now contains that response, run the outbound flow to serialize and send the response back to the client.
+	s.outboundFlow(ctx, msg, response, outbound)
+}
+
+func (s *Server) outboundFlow(ctx context.Context, req packet, resp Message, outbound chan<- packet) {
+	// 3. Flow 3: Server Outbound (Sending a Response)
+	// This flow describes the server application reacting to the received request, generating a response, and preparing it for the network.
+
+	// Transformation - NewResponse
+	// The server application handler generates a response message (or Status Report).
+	// It utilizes the exact Exchange ID from the incoming request.
+	// Because the server is the Responder, the Initiator (`I`) flag is set to 0.
+	outPkt := req.NewResponse(resp)
+
+	// 3. Bootstrapping Server Outbound (Responding with Sigma2)
+	if req.header.SessionID == 0 {
+		// Transformation (NewSigma2)
+		// The server generates a Sigma2 message.
+		// (Note: NewResponse above created the packet structure, but payload generation for Sigma2 would happen in the handler.
+		// Here we handle the transport transitions).
+
+		// Transition: The server allocates a Local Session Identifier for the future secure session,
+		// assigns an unencrypted message counter, and sends Sigma2 back to the client.
+		sessionCtx := &sessionContext{ID: 0}
+		if err := outPkt.AssignMessageCounter(sessionCtx); err != nil {
+			s.network.logger.Error("failed to assign message counter", "error", err)
+			return
 		}
 
-		n, addr, err := pc.ReadFrom(buf)
-		if err != nil {
-			if s.shuttingDown() {
-				return errors.New("server closed")
-			}
+		// Send the response back to the network layer (Bypass Encryption)
+		select {
+		case outbound <- outPkt:
+		case <-ctx.Done():
+		}
+		return
+	}
+
+	// Transition - PiggybackAck
+	// Before the message is finalized, the server checks its Acknowledgement Table.
+	// Finding the pending acknowledgement for the client's request, it sets the `A` (Acknowledgement) flag to 1
+	// and injects the client's `Acknowledged Message Counter` into the outbound Protocol Header.
+	if (req.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
+		outPkt.PiggybackAck(req.header.MessageCounter)
+	}
+
+	// Transition - AssignMessageCounter
+	// The server retrieves and increments its own Local Message Counter for the outgoing session.
+	if err := outPkt.AssignMessageCounter(outPkt.session); err != nil {
+		s.network.logger.Error("failed to assign message counter", "error", err)
+		return
+	}
+
+	// Transition - EncryptAndAuthenticate
+	// The payload and protocol header are encrypted using AES-CCM with the session's Encryption Key.
+	if err := outPkt.EncryptAndAuthenticate(outPkt.session.EncryptionKey); err != nil {
+		s.network.logger.Error("failed to encrypt", "error", err)
+		return
+	}
+
+	// Send the response back to the network layer
+	select {
+	case outbound <- outPkt:
+	case <-ctx.Done():
+	}
+}
+
+func (s *Server) inboundFlow(ctx context.Context, req *packet) error {
+	// 2. Flow 2: Server Inbound (Receiving a Request)
+	// This flow describes a server receiving the physical datagram from the network and processing it up the stack.
+
+	// Transition - DecodeMessageHeader
+	// The unencrypted Message Header is parsed to extract the Session ID, Message Flags, and Security Flags.
+	if err := req.DecodeMessageHeader(req.payload); err != nil {
+		s.network.logger.Warn("failed to decode message header", "error", err)
+		return err
+	}
+
+	// Resolve Session
+	if req.header.SessionID == 0 {
+		req.session = &sessionContext{ID: 0}
+	} else {
+		if val, ok := s.sessions.Load(req.header.SessionID); ok {
+			req.session = val.(*sessionContext)
+		} else {
+			return fmt.Errorf("unknown session %d", req.header.SessionID)
+		}
+	}
+
+	// 2. Bootstrapping Server Inbound (Receiving Sigma1)
+	if req.header.SessionID == 0 {
+		// Transition (ProcessMessageCounter)
+		// The server checks the unencrypted message counter against its Unsecured Session Context.
+		if err := req.ProcessMessageCounter(&messageReceptionState{}); err != nil {
+			s.network.logger.Warn("replay detected or invalid counter", "error", err)
 			return err
 		}
 
-		proto, payload := decodeProtocolMessageHeader(buf[:n])
-
-		// ctx := context.Background()
-		// if s.BaseContext != nil {
-		// 	ctx = s.BaseContext(addr)
-		// }
-
-		exch := &ExchangeContext{
-			//ctx:  ctx,
-			conn: pc,
-			exchange: exchange{
-				RemoteAddr:            addr,
-				ProtocolMessageHeader: proto,
-				Payload:               payload,
-				reliable:              (proto.ExchangeFlags & FlagReliable) != 0,
-			},
+		// Transformation (CreateExchange & Route)
+		// Because the message has the PROTOCOL_ID_SECURE_CHANNEL Protocol ID and Sigma1 Opcode,
+		// the Exchange Layer routes it directly to the Secure Channel protocol handlers.
+		if err := req.DecodeProtocolHeader(); err != nil {
+			s.network.logger.Warn("failed to decode protocol header", "error", err)
+			return err
 		}
+		return nil
+	}
 
-		// Handle MRP: Send Standalone ACK if reliable
-		if exch.reliable {
-			// TODO: Support piggybacking in the future.
-			// For now, send Standalone ACK immediately.
-			ack := exch.ack(proto.ExchangeID)
-
-			if _, err := ack.writeTo(exch.conn); err != nil {
-				// Matter Spec 4.11.8: Standalone Acknowledgements SHALL NOT be retransmitted.
-				log.Printf("failed to ack: %v\n", err)
-			}
+	// Transition - DecryptAndAuthenticate
+	// The server applies AES-CCM using the session's Encryption Key.
+	var protocolHeaderDecoded bool
+	if len(req.session.DecryptionKey) > 0 {
+		if err := req.DecryptAndAuthenticate(req.session.DecryptionKey); err != nil {
+			s.network.logger.Warn("failed to decrypt and authenticate", "error", err)
+			return err
 		}
+		protocolHeaderDecoded = true
+	}
 
-		handler := s.Handler
-		if handler == nil {
-			// Default fallback if needed, or panic? For now, assume handler is set.
-			continue
+	// Transition - ProcessMessageCounter
+	// The decrypted Message Counter is validated against the sender's `MessageReceptionState` sliding window.
+	if err := req.ProcessMessageCounter(&messageReceptionState{}); err != nil {
+		s.network.logger.Warn("replay detected or invalid counter", "error", err)
+		return err
+	}
+
+	// Transition - DecodeProtocolHeader
+	// The stack inspects the Protocol Header.
+	if !protocolHeaderDecoded {
+		if err := req.DecodeProtocolHeader(); err != nil {
+			s.network.logger.Warn("failed to decode protocol header", "error", err)
+			return err
 		}
-
-		go handler.Serve(exch)
-	}
-}
-
-func (s *Server) trackConn(c net.PacketConn, add bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.activeConn == nil {
-		s.activeConn = make(map[net.PacketConn]struct{})
-	}
-	if add {
-		s.activeConn[c] = struct{}{}
-	} else {
-		delete(s.activeConn, c)
-	}
-}
-
-func (s *Server) shuttingDown() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.inShutdown
-}
-
-// Shutdown gracefully shuts down the server without interrupting any active exchanges.
-// For UDP, this primarily means closing the listener to stop accepting new packets.
-func (s *Server) Shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	s.inShutdown = true
-	s.mu.Unlock()
-
-	// Close all active connections to unblock ReadFrom
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.activeConn {
-		c.Close()
 	}
 	return nil
+}
+
+func (s *Server) handleSigma1(req *packet) (Message, error) {
+	caseCtx := &CASEContext{Fabric: s.Fabric}
+	if err := caseCtx.ParseSigma1(req.payload); err != nil {
+		return Message{}, err
+	}
+
+	// TODO: move this new session ID logic to a more central place (there is probably other places where we need to generate a new session ID)
+	var newSessionID uint16
+	binary.Read(rand.Reader, binary.LittleEndian, &newSessionID)
+	caseCtx.ResponderSessionID = newSessionID
+
+	pkt, err := caseCtx.GenerateSigma2()
+	if err != nil {
+		return Message{}, err
+	}
+
+	session := &sessionContext{ID: newSessionID, caseCtx: caseCtx}
+	s.sessions.Store(newSessionID, session)
+
+	return Message{
+		ProtocolID: pkt.protocolHeader.ProtocolId,
+		OpCode:     pkt.protocolHeader.Opcode,
+		payload:    pkt.payload,
+	}, nil
+}
+
+func (s *Server) handleSigma3(req *packet) (Message, error) {
+	val, ok := s.sessions.Load(req.header.SessionID)
+	if !ok {
+		return Message{}, fmt.Errorf("session not found")
+	}
+	session := val.(*sessionContext)
+
+	if session.caseCtx == nil {
+		return Message{}, fmt.Errorf("session not found")
+	}
+
+	if err := session.caseCtx.ParseSigma3(req.payload); err != nil {
+		return Message{}, err
+	}
+
+	enc, dec := session.caseCtx.SessionKeys()
+	session.DecryptionKey = enc
+	session.EncryptionKey = dec
+
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.LittleEndian, uint16(0)) // GeneralCode Success
+	binary.Write(&buf, binary.LittleEndian, uint32(0)) // ProtocolId
+	binary.Write(&buf, binary.LittleEndian, uint16(0)) // ProtocolCode
+
+	return Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, payload: buf.Bytes()}, nil
 }

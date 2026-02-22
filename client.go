@@ -1,211 +1,241 @@
 package matter
 
 import (
-	"context"
 	"fmt"
-	"log"
-	"math/rand"
+	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
-
-	"github.com/tom-code/gomat"
 )
 
 // Client is a Matter client.
 type Client struct {
+	network
+
 	// Transport specifies the mechanism by which individual requests are made.
 	// If nil, a new ephemeral net.PacketConn is created for each request.
 	Transport net.PacketConn
 
-	// Channels for internal loop communication
-
-	incoming   chan exchange
-	register   chan clientExchange
-	unregister chan clientExchange
-	outgoing   chan exchange
+	// chan based network connection for the client to send and receive messages to/from the network layer.
+	conn *connection
 
 	initOnce sync.Once
+	session  *sessionContext
+	Fabric   *Fabric
+
+	exchanges sync.Map
 }
 
-// attache together an exchange and a response chan.
-type clientExchange struct {
-	exchange
-	ch chan exchange
-}
+var clientNetworkLevel = slog.LevelWarn
 
 func (c *Client) init() {
 	c.initOnce.Do(func() {
-		c.incoming = make(chan exchange)
-		c.register = make(chan clientExchange)
-		c.unregister = make(chan clientExchange)
-		c.outgoing = make(chan exchange)
+		c.network.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: clientNetworkLevel,
+		})).With("agent", "client")
 
 		if c.Transport == nil {
 			var err error
-			c.Transport, err = net.ListenPacket("udp", ":0")
+			c.Transport, err = net.ListenPacket("udp", ":")
 			if err != nil {
 				panic(fmt.Sprintf("failed to create default transport: %v", err))
 			}
 		}
-
-		go c.listenLoop()
-		go c.managerLoop()
-		go c.writerLoop()
+		// open up the  chan based network connection.
+		c.conn = c.network.new(c.Transport)
+		go c.inboundFlow()
 	})
 }
 
-func (c *Client) listenLoop() {
-	buf := make([]byte, 4096)
-	for {
-		n, addr, err := c.Transport.ReadFrom(buf)
-		if err != nil {
-			return
-		}
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-		hdr, payload := decodeProtocolMessageHeader(pkt)
-		x := exchange{
-			RemoteAddr:            addr,
-			ProtocolMessageHeader: hdr,
-			Payload:               payload,
-			reliable:              (hdr.ExchangeFlags & FlagReliable) != 0,
-		}
-
-		c.incoming <- x
-	}
-}
-
-func (c *Client) managerLoop() {
-	exchanges := make(map[uint16]chan exchange)
-	for {
-		select {
-		case x := <-c.register:
-			exchanges[x.ProtocolMessageHeader.ExchangeID] = x.ch
-		case x := <-c.unregister:
-			delete(exchanges, x.ProtocolMessageHeader.ExchangeID)
-		case x := <-c.incoming:
-			if ch, ok := exchanges[x.ProtocolMessageHeader.ExchangeID]; ok {
-				select {
-				case ch <- x:
-				default:
-				}
-			}
-		}
-	}
-}
-
-func (c *Client) writerLoop() {
-	for x := range c.outgoing {
-		x.writeTo(c.Transport)
-	}
-}
-
-// Request sends a raw message to the address and waits for a response.
-func (c *Client) Request(ctx context.Context, addr net.Addr, proto gomat.ProtocolId, opcode gomat.Opcode, payload []byte) (gomat.ProtocolId, gomat.Opcode, []byte, error) {
-	// Make sure the client is initialized once.
+func (c *Client) Request(dest net.Addr, msg Message) (resp Message, err error) {
 	c.init()
 
-	// Create an unique exchange context for this request.
-	x := clientExchange{
-		exchange: exchange{
-			RemoteAddr: addr,
-			ProtocolMessageHeader: ProtocolMessageHeader{
-				ExchangeFlags: FlagReliable,
-				Opcode:        opcode,
-				ProtocolId:    proto,
-				ExchangeID:    uint16(rand.Intn(0xffff)),
-			},
-			Payload:  payload,
-			reliable: true,
-		},
-		ch: make(chan exchange, 1),
+	// Check if we need to bootstrap (Logic: if no session)
+	if c.session == nil {
+		if err := c.ensureSession(dest); err != nil {
+			return Message{}, err
+		}
 	}
 
-	// Register the response chan to receive responses related to the exchangeID.
-	select {
-	case c.register <- x:
-	case <-ctx.Done():
-		return 0, 0, nil, ctx.Err()
+	respChan := make(chan packet, 1)
+	defer close(respChan)
+	// 1. Originating Transformations (Client/Initiator Genesis)
+	req, err := c.outboundFlow(msg, dest)
+	if err != nil {
+		return Message{}, err
 	}
-	// and deregister it, afterwards.
+
+	// Register the response channel
+	c.exchanges.Store(req.protocolHeader.ExchangeID, respChan)
 	defer func() {
-		select {
-		case c.unregister <- x:
-		case <-time.After(100 * time.Millisecond):
-		}
+		c.exchanges.Delete(req.protocolHeader.ExchangeID)
 	}()
 
-	// Wait for response loop, implementing the MRP spec.
-	var sawAck bool
-	// MRP Parameters (simplified)
-	retryInterval := 200 * time.Millisecond
-	maxRetries := 5
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Send if we haven't received an ACK yet
-		if !sawAck {
-			select {
-			// pass the request to the sending layer 1.
-			case c.outgoing <- x.exchange:
-			case <-ctx.Done():
-				return 0, 0, nil, ctx.Err()
-			}
-		}
-
-		// Determine timeout
-		timeout := retryInterval * (1 << attempt)
-		if sawAck {
-			// If we already saw an ACK, we are just waiting for the application response.
-			timeout = 10 * time.Second
-		}
-		// Add Jitter: t + rand(0, t * 0.1)
-		if timeout > 0 {
-			timeout += time.Duration(rand.Int63n(int64(timeout) / 10))
-		}
-
-		// Wait on the next Responsem either an empty ack, or an actual message with a piggybacking ack.
-		select {
-		case resp := <-x.ch:
-
-			// Check for Standalone ACK
-			// ProtocolId is SecureChannel and Opcode is ACK
-			if resp.IsAck() {
-				sawAck = true
-				// Stop retransmitting, but continue loop to wait for app response
-				continue
-			}
-			// This was not a standalone ACK but a real message, we acknowledge that it was received if requested.
-			if (resp.ProtocolMessageHeader.ExchangeFlags & FlagReliable) != 0 {
-				// Ack the response.
-				ack := x.ack(resp.ProtocolMessageHeader.ExchangeID)
-				select {
-				case c.outgoing <- ack:
-				default:
-					log.Printf("failed to queue ack")
-				}
-			}
-			// We simply return the response whatever that is.
-			// Maybe according to the spec we should test that protocol ID and OpCode validity.
-
-			// Check Piggybacked ACK
-			if (resp.ProtocolMessageHeader.ExchangeFlags & FlagAck) != 0 {
-				// We could verify resp.ProtocolMessageHeader.AckCounter == msgCounter here
-			}
-			return resp.ProtocolMessageHeader.ProtocolId, resp.ProtocolMessageHeader.Opcode, resp.Payload, nil
-
-		case <-time.After(timeout):
-			if sawAck {
-				// If we saw ACK but timed out waiting for response, that's an error
-				return 0, 0, nil, fmt.Errorf("timeout waiting for response after ACK")
-			}
-			// Retry loop
-			continue
-
-		case <-ctx.Done():
-			return 0, 0, nil, ctx.Err()
-		}
+	var rp packet
+	select {
+	case rp = <-respChan:
+	case <-time.After(5 * time.Second):
+		return Message{}, fmt.Errorf("request timed out")
 	}
 
-	return 0, 0, nil, fmt.Errorf("max retries exceeded")
+	return Message{
+		ProtocolID: rp.protocolHeader.ProtocolId,
+		OpCode:     rp.protocolHeader.Opcode,
+		payload:    rp.payload,
+	}, nil
+}
+
+func (c *Client) ensureSession(dest net.Addr) error {
+	if c.session != nil {
+		return nil
+	}
+	// 1. Bootstrapping Client Outbound (Initiating CASE)
+	// Transformation (NewSigma1)
+	// The client's Secure Channel Protocol handler generates a Sigma1 message.
+	caseCtx := &CASEContext{Fabric: c.Fabric}
+	sigma1 := caseCtx.GenerateSigma1()
+	sigma1.addr = dest
+
+	// Transition (AssignMessageCounter)
+	// Because this is an Unsecured Session, the stack uses and increments the Global Unencrypted Message Counter.
+	unsecuredSession := &sessionContext{ID: 0}
+	if err := sigma1.AssignMessageCounter(unsecuredSession); err != nil {
+		return err
+	}
+
+	// Register the response channel for Sigma2
+	resp := make(chan packet, 1)
+	c.exchanges.Store(sigma1.protocolHeader.ExchangeID, resp)
+	defer func() {
+		c.exchanges.Delete(sigma1.protocolHeader.ExchangeID)
+	}()
+
+	// Transition (Bypass Encryption)
+	// The message bypasses standard AEAD encryption and privacy obfuscation since it is sent unencrypted over the network.
+
+	if _, err := sigma1.WriteTo(c.Transport); err != nil {
+		return err
+	}
+
+	// 4. Bootstrapping Client Inbound (Receiving Sigma2 & Finishing)
+	var rp packet
+	select {
+	case rp = <-resp:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout waiting for Sigma2")
+	}
+
+	// Check if it is an unencrypted message (Session ID 0)
+	if rp.header.SessionID == 0 {
+		if rp.protocolHeader.Opcode == OpCodeCASESigma2 {
+			sigma3, peerSessionID, err := caseCtx.ParseSigma2(rp.payload)
+			if err != nil {
+				return err
+			}
+			// Transformation (NewSigma3)
+			// If the server is authenticated, the client generates a Sigma3 message.
+			sigma3.addr = dest
+
+			// Handshake complete: Initialize the secure session immediately so we can decrypt SigmaFinished
+			encKey, decKey := caseCtx.SessionKeys()
+			c.session = &sessionContext{
+				ID:            peerSessionID,
+				EncryptionKey: encKey,
+				DecryptionKey: decKey,
+			}
+
+			// Key Derivation and sending Sigma3
+			// It transmits Sigma3 to the server.
+			if _, err := sigma3.WriteTo(c.Transport); err != nil {
+				return err
+			}
+
+			// Wait for SigmaFinished (Status Report)
+			var rpFinished packet
+			select {
+			case rpFinished = <-resp:
+			case <-time.After(5 * time.Second):
+				return fmt.Errorf("timeout waiting for SigmaFinished")
+			}
+			if rpFinished.protocolHeader.Opcode != OpCodeStatusReport {
+				return fmt.Errorf("unexpected message: %v", rpFinished.protocolHeader.Opcode)
+			}
+
+			return nil
+		}
+	}
+	return fmt.Errorf("unexpected message during bootstrapping")
+}
+
+func (c *Client) outboundFlow(msg Message, dest net.Addr) (*packet, error) {
+	// 1. Originating Transformations (Client/Initiator Genesis)
+	// Create a brand new message to initiate a transaction.
+	// The node in the Initiator role must allocate a new Exchange ID and always set the Initiator (`I`) flag.
+	// The message is bound to an established secure session.
+	req := NewRequest(c.session, msg.ProtocolID, msg.OpCode, msg.payload)
+	req.session = c.session
+	req.addr = dest // Set the destination address for the request
+
+	// Transition (Reliability Setup)
+	// If the message is being dispatched over an unreliable transport like UDP, the Reliability (`R`) flag is set.
+	req.protocolHeader.ExchangeFlags |= FlagReliable
+
+	// Transition - AssignMessageCounter
+	// The stack retrieves the session's active Local Message Counter and increments it by 1.
+	if err := req.AssignMessageCounter(c.session); err != nil {
+		return nil, err
+	}
+
+	// Transition - EncryptAndAuthenticate
+	// Using AES-CCM, the AEAD encryption operation is executed.
+	// The Encryption Key bound to the Session ID is used to encrypt the Protocol Header and Application Payload.
+	if err := req.EncryptAndAuthenticate(c.session.EncryptionKey); err != nil {
+		return nil, err
+	}
+
+	// Send the packet to the network
+	if _, err := req.WriteTo(c.Transport); err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+// 4. Client Inbound (Receiving a Response)
+// This flow describes the client receiving the server's response datagram and matching it to the original request transaction.
+func (c *Client) inboundFlow() {
+	for rp := range c.conn.inbound {
+		// Transition - DecodeMessageHeader
+		if err := rp.DecodeMessageHeader(rp.payload); err != nil {
+			c.logger.Warn("failed to decode message header", "error", err)
+			continue
+		}
+
+		var protocolHeaderDecoded bool
+		if rp.header.SessionID != 0 {
+			// Transition - DecryptAndAuthenticate
+			// The Encryption Key bound to the Session ID is used to encrypt the Protocol Header and Application Payload.
+			if c.session != nil {
+				if err := rp.DecryptAndAuthenticate(c.session.DecryptionKey); err != nil {
+					c.logger.Warn("failed to decrypt and authenticate", "error", err)
+					continue
+				}
+				protocolHeaderDecoded = true
+			}
+		}
+
+		// Transition - DecodeProtocolHeader / Exchange Matching
+		if !protocolHeaderDecoded {
+			if err := rp.DecodeProtocolHeader(); err != nil {
+				c.logger.Warn("failed to decode protocol header", "error", err)
+				continue
+			}
+		}
+
+		if val, ok := c.exchanges.Load(rp.protocolHeader.ExchangeID); ok {
+			if resp, ok := val.(chan packet); ok {
+				resp <- rp
+			}
+		}
+	}
 }
