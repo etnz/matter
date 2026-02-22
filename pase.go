@@ -21,12 +21,13 @@ import (
 
 // PASE is used exclusively during the commissioning phase to securely establish the first session.
 type PASEContext struct {
+	// user provided passcode from QR Code usually but any means also works.
+	Passcode uint32
 	// Internal state: SPAKE2+ context, transcript hashes, derived shared secrets, etc.
 	InitiatorRandom    []byte
 	InitiatorSessionID uint16
 	ResponderSessionID uint16
 	PasscodeID         uint16
-	Passcode           uint32
 	ExchangeID         uint16
 
 	PBKDFParamRequest  []byte
@@ -37,6 +38,7 @@ type PASEContext struct {
 	pA     []byte // pA
 	pB     []byte // pB
 	Ke     []byte
+	cA     []byte
 }
 
 var (
@@ -100,20 +102,20 @@ func (c *PASEContext) GeneratePBKDFParamRequest() *packet {
 func (c *PASEContext) ParsePBKDFParamResponseAndGeneratePake1(payload []byte) (pake1 *packet, err error) {
 	c.PBKDFParamResponse = payload
 	tlv := mattertlv.Decode(payload)
-	// ResponderRandom (1) - not used in calculation but extracted
+	// InitiatorRandom (1) - not used in calculation but extracted
 	_ = tlv.GetOctetStringRec([]int{1})
-	resSessionID, err := tlv.GetIntRec([]int{2})
+	resSessionID, err := tlv.GetIntRec([]int{3})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get responder session ID: %v", err)
 	}
 	c.ResponderSessionID = uint16(resSessionID)
 
-	// PBKDFParameters (3) -> Iterations (1), Salt (2)
-	iterations, err := tlv.GetIntRec([]int{3, 1})
+	// PBKDFParameters (4) -> Iterations (1), Salt (2)
+	iterations, err := tlv.GetIntRec([]int{4, 1})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get iterations: %v", err)
 	}
-	salt := tlv.GetOctetStringRec([]int{3, 2})
+	salt := tlv.GetOctetStringRec([]int{4, 2})
 
 	// Derive w0, w1
 	passcodeBytes := make([]byte, 4)
@@ -131,7 +133,7 @@ func (c *PASEContext) ParsePBKDFParamResponseAndGeneratePake1(payload []byte) (p
 
 	// Generate pA = x*G + w0*M
 	// M point for P256 (uncompressed) defined in Matter Spec Section 3.9. SPAKE2+
-	mBytes, _ := hex.DecodeString("04886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f5f35f871d93729f5520d5c946519652f9c8819c6e6789c3b99067a92a9f37e")
+	mBytes, _ := hex.DecodeString("02886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f")
 	M, err := nistec.NewP256Point().SetBytes(mBytes)
 	if err != nil {
 		return nil, fmt.Errorf("invalid M point: %v", err)
@@ -205,7 +207,7 @@ func (c *PASEContext) ParsePake2AndGeneratePake3(payload []byte) (pake3 *packet,
 
 	// Z = x*(pB - w0*N)
 	// N point for P256 (uncompressed) defined in Matter Spec Section 3.9. SPAKE2+
-	nBytes, _ := hex.DecodeString("04d8bbd6c639c62937b04d997f38c3770719c629d7014d49a24b4f9868f432c7918185f8335a7464a330173183712d30999e461b8432b7d945129bf8de29162297")
+	nBytes, _ := hex.DecodeString("03d8bbd6c639c62937b04d997f38c3770719c629d7014d49a24b4f98baa1292b49")
 	N, err := nistec.NewP256Point().SetBytes(nBytes)
 	if err != nil {
 		return nil, 0, fmt.Errorf("invalid N point: %v", err)
@@ -296,6 +298,183 @@ func (c *PASEContext) SessionKeys() (encryptionKey, decryptionKey, attestationCh
 	io.ReadFull(kdf, keys)
 
 	return keys[:16], keys[16:32], keys[32:]
+}
+
+func (c *PASEContext) ParsePBKDFParamRequest(payload []byte) error {
+	tlv := mattertlv.Decode(payload)
+	c.InitiatorRandom = tlv.GetOctetStringRec([]int{1})
+	sessID, err := tlv.GetIntRec([]int{2})
+	if err != nil {
+		return fmt.Errorf("failed to get initiator session ID: %v", err)
+	}
+	c.InitiatorSessionID = uint16(sessID)
+	passcodeID, err := tlv.GetIntRec([]int{3})
+	if err != nil {
+		return fmt.Errorf("failed to get passcode ID: %v", err)
+	}
+	c.PasscodeID = uint16(passcodeID)
+	c.PBKDFParamRequest = payload
+	return nil
+}
+
+func (c *PASEContext) GeneratePBKDFParamResponse() (*packet, error) {
+	// Responder Random
+	responderRandom := make([]byte, 32)
+	rand.Read(responderRandom)
+
+	// PBKDF Parameters
+	iterations := uint32(1000) // Standard default
+	salt := make([]byte, 16)
+	rand.Read(salt)
+
+	var tlv mattertlv.TLVBuffer
+	tlv.WriteAnonStruct()
+	tlv.WriteOctetString(1, c.InitiatorRandom)
+	tlv.WriteOctetString(2, responderRandom)
+	tlv.WriteUInt(3, mattertlv.TYPE_UINT_2, uint64(c.ResponderSessionID))
+	tlv.WriteStruct(4)
+	tlv.WriteUInt(1, mattertlv.TYPE_UINT_4, uint64(iterations))
+	tlv.WriteOctetString(2, salt)
+	tlv.WriteStructEnd()
+	tlv.WriteStructEnd()
+
+	c.PBKDFParamResponse = tlv.Bytes()
+
+	return &packet{
+		header: messageHeader{SessionID: 0},
+		protocolHeader: protocolMessageHeader{
+			Opcode:     OpCodePBKDFParamResponse,
+			ProtocolId: ProtocolIDSecureChannel,
+		},
+		payload: c.PBKDFParamResponse,
+	}, nil
+}
+
+func (c *PASEContext) ParsePake1AndGeneratePake2(payload []byte) (*packet, error) {
+	tlv := mattertlv.Decode(payload)
+	pABytes := tlv.GetOctetStringRec([]int{1})
+	pA, err := nistec.NewP256Point().SetBytes(pABytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pA point: %v", err)
+	}
+	c.pA = pABytes
+
+	// Re-parse PBKDF params from our own response to calculate w0, w1
+	tlvResp := mattertlv.Decode(c.PBKDFParamResponse)
+	iterations, _ := tlvResp.GetIntRec([]int{4, 1})
+	salt := tlvResp.GetOctetStringRec([]int{4, 2})
+
+	passcodeBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(passcodeBytes, c.Passcode)
+	ws := pbkdf2.Key(passcodeBytes, salt, int(iterations), 80, sha256.New)
+	w0s := ws[:40]
+	w1s := ws[40:]
+
+	p := p256P
+	c.w0 = new(big.Int).SetBytes(w0s)
+	c.w0.Mod(c.w0, p)
+	c.w1 = new(big.Int).SetBytes(w1s)
+	c.w1.Mod(c.w1, p)
+
+	// Generate y (ephemeral key)
+	ecdhKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	y := ecdhKey.Bytes()
+	c.x = y // Store y in x field
+
+	// y*G
+	yG, err := nistec.NewP256Point().SetBytes(ecdhKey.PublicKey().Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	// N point
+	nBytes, _ := hex.DecodeString("03d8bbd6c639c62937b04d997f38c3770719c629d7014d49a24b4f98baa1292b49")
+	N, err := nistec.NewP256Point().SetBytes(nBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid N point: %v", err)
+	}
+
+	// w0*N
+	w0N, err := nistec.NewP256Point().ScalarMult(N, c.w0.Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	// pB = y*G + w0*N
+	pB := nistec.NewP256Point().Add(yG, w0N)
+	c.pB = pB.Bytes()
+
+	// Calculate TT
+	contextHash := sha256.Sum256(append([]byte("CHIP PAKE V1 Commissioning"), append(c.PBKDFParamRequest, c.PBKDFParamResponse...)...))
+
+	// M point
+	mBytes, _ := hex.DecodeString("02886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f")
+	M, err := nistec.NewP256Point().SetBytes(mBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Z = y*(pA - w0*M)
+	// Calculate -w0 mod N
+	w0Mod := new(big.Int).Mod(c.w0, p256N)
+	w0Neg := new(big.Int).Sub(p256N, w0Mod)
+	w0Neg.Mod(w0Neg, p256N)
+
+	w0NegM, _ := nistec.NewP256Point().ScalarMult(M, bigIntTo32Bytes(w0Neg))
+	temp := nistec.NewP256Point().Add(pA, w0NegM)
+	Z, _ := nistec.NewP256Point().ScalarMult(temp, y)
+
+	// V = y*L where L = w1*G. Since we don't have L, we compute V = w1*(y*G) = w1*yG
+	V, _ := nistec.NewP256Point().ScalarMult(yG, c.w1.Bytes())
+
+	tt := make([]byte, 0)
+	tt = appendLengthAndValue(tt, contextHash[:])
+	tt = appendLengthAndValue(tt, c.pA)
+	tt = appendLengthAndValue(tt, c.pB)
+	tt = appendLengthAndValue(tt, Z.Bytes())
+	tt = appendLengthAndValue(tt, V.Bytes())
+	tt = appendLengthAndValue(tt, bigIntTo32Bytes(c.w0))
+
+	ka := sha256.Sum256(tt)
+	c.Ke = ka[:16]
+	kcA := ka[16:32]
+	kcB := ka[16:32]
+
+	macA := hmac.New(sha256.New, kcA)
+	macA.Write(c.pB)
+	c.cA = macA.Sum(nil)
+
+	macB := hmac.New(sha256.New, kcB)
+	macB.Write(c.pA)
+	cB := macB.Sum(nil)
+
+	var tlvOut mattertlv.TLVBuffer
+	tlvOut.WriteAnonStruct()
+	tlvOut.WriteOctetString(1, c.pB)
+	tlvOut.WriteOctetString(2, cB)
+	tlvOut.WriteStructEnd()
+
+	return &packet{
+		header: messageHeader{SessionID: 0},
+		protocolHeader: protocolMessageHeader{
+			Opcode:     OpCodePASEPake2,
+			ProtocolId: ProtocolIDSecureChannel,
+		},
+		payload: tlvOut.Bytes(),
+	}, nil
+}
+
+func (c *PASEContext) ParsePake3(payload []byte) error {
+	tlv := mattertlv.Decode(payload)
+	cA := tlv.GetOctetStringRec([]int{1})
+
+	if !hmac.Equal(cA, c.cA) {
+		return fmt.Errorf("invalid cA confirmation")
+	}
+	return nil
 }
 
 func appendLengthAndValue(buf []byte, val []byte) []byte {

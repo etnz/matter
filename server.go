@@ -44,7 +44,8 @@ type Server struct {
 
 	// Addr optionally specifies the UDP address for the server to listen on,
 	// in the form "host:port". If empty, ":5540" (standard Matter port) is used.
-	Addr string
+	Addr     string
+	Passcode uint32
 
 	// Handler to invoke, ServeMux is used if nil.
 	Handler Handler
@@ -63,8 +64,9 @@ type Server struct {
 	Fabric      *Fabric
 
 	// shutdown chan struct{}
-	initOnce sync.Once
-	sessions sync.Map
+	initOnce     sync.Once
+	sessions     sync.Map
+	paseSessions sync.Map
 }
 
 // ListenAndServe listens on the UDP network address s.Addr and then calls Serve.
@@ -86,13 +88,6 @@ func (s *Server) init() {
 		s.network.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 			Level: serverNetworkLevel,
 		})).With("agent", "server")
-
-		// connection are passed to the shutdown goroutine that receives conn to remember and a shutdown pill.
-		// s.shutdown = make(chan struct{})
-
-		if s.Fabric == nil {
-			panic("server requires a fabric")
-		}
 	})
 }
 
@@ -146,6 +141,30 @@ func (s *Server) handle(msg packet, outbound chan<- packet) {
 			response, err = s.handleSigma3(&msg)
 			if err != nil {
 				s.network.logger.Warn("failed to handle Sigma3", "error", err)
+				return
+			}
+			handled = true
+		case OpCodePBKDFParamRequest:
+			var err error
+			response, err = s.handlePBKDFParamRequest(&msg)
+			if err != nil {
+				s.network.logger.Warn("failed to handle PBKDFParamRequest", "error", err)
+				return
+			}
+			handled = true
+		case OpCodePASEPake1:
+			var err error
+			response, err = s.handlePake1(&msg)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Pake1", "error", err)
+				return
+			}
+			handled = true
+		case OpCodePASEPake3:
+			var err error
+			response, err = s.handlePake3(&msg)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Pake3", "error", err)
 				return
 			}
 			handled = true
@@ -459,6 +478,80 @@ func (s *Server) handleSigma3(req *packet) (Message, error) {
 	enc, dec := session.caseCtx.SessionKeys()
 	session.DecryptionKey = enc
 	session.EncryptionKey = dec
+
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.LittleEndian, uint16(0)) // GeneralCode Success
+	binary.Write(&buf, binary.LittleEndian, uint32(0)) // ProtocolId
+	binary.Write(&buf, binary.LittleEndian, uint16(0)) // ProtocolCode
+
+	return Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: buf.Bytes()}, nil
+}
+
+func (s *Server) handlePBKDFParamRequest(req *packet) (Message, error) {
+	paseCtx := &PASEContext{Passcode: s.Passcode}
+	if paseCtx.Passcode == 0 {
+		paseCtx.Passcode = 20202021 // Default passcode
+	}
+	if err := paseCtx.ParsePBKDFParamRequest(req.payload); err != nil {
+		return Message{}, err
+	}
+
+	var newSessionID uint16
+	binary.Read(rand.Reader, binary.LittleEndian, &newSessionID)
+	paseCtx.ResponderSessionID = newSessionID
+
+	pkt, err := paseCtx.GeneratePBKDFParamResponse()
+	if err != nil {
+		return Message{}, err
+	}
+
+	s.paseSessions.Store(req.protocolHeader.ExchangeID, paseCtx)
+
+	return Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodePBKDFParamResponse,
+		Payload:    pkt.payload,
+	}, nil
+}
+
+func (s *Server) handlePake1(req *packet) (Message, error) {
+	val, ok := s.paseSessions.Load(req.protocolHeader.ExchangeID)
+	if !ok {
+		return Message{}, fmt.Errorf("PASE context not found")
+	}
+	paseCtx := val.(*PASEContext)
+
+	pkt, err := paseCtx.ParsePake1AndGeneratePake2(req.payload)
+	if err != nil {
+		return Message{}, err
+	}
+
+	return Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodePASEPake2,
+		Payload:    pkt.payload,
+	}, nil
+}
+
+func (s *Server) handlePake3(req *packet) (Message, error) {
+	val, ok := s.paseSessions.Load(req.protocolHeader.ExchangeID)
+	if !ok {
+		return Message{}, fmt.Errorf("PASE context not found")
+	}
+	paseCtx := val.(*PASEContext)
+
+	if err := paseCtx.ParsePake3(req.payload); err != nil {
+		return Message{}, err
+	}
+
+	enc, dec, _ := paseCtx.SessionKeys()
+	session := &sessionContext{
+		ID:            paseCtx.ResponderSessionID,
+		DecryptionKey: enc,
+		EncryptionKey: dec,
+	}
+	s.sessions.Store(paseCtx.ResponderSessionID, session)
+	s.paseSessions.Delete(req.protocolHeader.ExchangeID)
 
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.LittleEndian, uint16(0)) // GeneralCode Success

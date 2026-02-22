@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func setupInteractionTest(t *testing.T) (*Client, *Server, net.Addr) {
+func setupInteractionTest(t *testing.T) (*Client, *Server) {
 	t.Helper()
 	network := newMockNetwork()
 
@@ -38,15 +38,16 @@ func setupInteractionTest(t *testing.T) (*Client, *Server, net.Addr) {
 	clientConn := network.listenPacket("client:1234")
 	clientFabric := NewFabric(1, 2, ipk, cm)
 	client := &Client{
-		Transport: clientConn,
-		Fabric:    clientFabric,
+		Transport:   clientConn,
+		PeerAddress: &mockAddr{serverAddr},
+		Fabric:      clientFabric,
 	}
 
-	return client, server, &mockAddr{serverAddr}
+	return client, server
 }
 
 func TestInteraction_ReadRequest_PingPong(t *testing.T) {
-	client, server, serverAddr := setupInteractionTest(t)
+	client, server := setupInteractionTest(t)
 
 	ping := uint64(1234)
 	pong := uint8(123)
@@ -81,7 +82,7 @@ func TestInteraction_ReadRequest_PingPong(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := client.Read(serverAddr, req)
+	resp, err := client.Read(req)
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}

@@ -12,7 +12,7 @@ import (
 
 // TestPhase1_PingPong verifies the Phase 1 requirement:
 // The Client sends "PING", and the Server successfully triggers the handler and routes "PONG" back.
-func TestPhase1_PingPong(t *testing.T) {
+func Test_PingPong(t *testing.T) {
 	network := newMockNetwork()
 
 	// 1. Setup Server
@@ -45,8 +45,9 @@ func TestPhase1_PingPong(t *testing.T) {
 	clientConn := network.listenPacket("client:1234")
 	clientFabric := NewFabric(1, 2, ipk, cm)
 	client := &Client{
-		Transport: clientConn,
-		Fabric:    clientFabric,
+		Transport:   clientConn,
+		PeerAddress: &mockAddr{serverAddr},
+		Fabric:      clientFabric,
 	}
 
 	// 3. Execute Test
@@ -58,7 +59,73 @@ func TestPhase1_PingPong(t *testing.T) {
 		OpCode:     OpCodeInvokeRequest,
 		Payload:    []byte("PING"),
 	}
-	resp, err := client.Request(&mockAddr{serverAddr}, req)
+	resp, err := client.Request(req)
+	if err != nil {
+		t.Fatalf("client send failed: %v", err)
+	}
+
+	if !bytes.Equal(resp.Payload, []byte("PONG")) {
+		t.Errorf("got %s, want PONG", string(resp.Payload))
+	}
+}
+
+// TestPhase1_PingPong verifies identity and security layer with PASE.
+// The Client sends "PING", and the Server successfully triggers the handler and routes "PONG" back.
+func Test_PASEPingPong(t *testing.T) {
+	network := newMockNetwork()
+
+	// 1. Setup Server
+	serverAddr := "server:5540"
+	serverConn := network.listenPacket(serverAddr)
+	handler := HandlerFunc(func(ctx context.Context, msg Message, w MessageWriter) {
+		// Handler replies PONG (whatever is the protoccol ID or opCode.)
+		w.Response(Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeInvokeResponse, Payload: []byte("PONG")})
+	})
+
+	passcode := uint32(12345678) // factory passcode for the device.
+	cm, err := NewGeneratedCertificateManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipk := make([]byte, 16)
+	//fabric := NewFabric(1, 1, ipk, cm)
+	server := &Server{
+		Handler: handler,
+		// Fabric:  fabric, no fabric when a server needs to be commissioned first.
+		Passcode: passcode,
+	}
+
+	// Run server in goroutine
+	go func() {
+		if err := server.Serve(serverConn); err != nil && !errors.Is(err, net.ErrClosed) && err.Error() != "server closed" {
+			t.Errorf("server error: %v", err)
+		}
+	}()
+
+	// 2. Setup Client
+	clientConn := network.listenPacket("client:1234")
+	clientFabric := NewFabric(1, 2, ipk, cm)
+	client := &Client{
+		Transport:   clientConn,
+		PeerAddress: &mockAddr{serverAddr},
+		Fabric:      clientFabric,
+	}
+
+	// Execute PASE flow to establish session and fabric.
+	if err := client.ConnectWithPasscode(passcode); err != nil {
+		t.Fatalf("PASE flow failed: %v", err)
+	}
+
+	// 3. Execute Test
+	_, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodeInvokeRequest,
+		Payload:    []byte("PING"),
+	}
+	resp, err := client.Request(req)
 	if err != nil {
 		t.Fatalf("client send failed: %v", err)
 	}
