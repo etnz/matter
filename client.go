@@ -27,7 +27,7 @@ type Client struct {
 	exchanges sync.Map
 }
 
-var clientNetworkLevel = slog.LevelWarn
+var clientNetworkLevel = slog.LevelDebug
 
 func (c *Client) init() {
 	c.initOnce.Do(func() {
@@ -82,7 +82,7 @@ func (c *Client) Request(dest net.Addr, msg Message) (resp Message, err error) {
 	return Message{
 		ProtocolID: rp.protocolHeader.ProtocolId,
 		OpCode:     rp.protocolHeader.Opcode,
-		payload:    rp.payload,
+		Payload:    rp.payload,
 	}, nil
 }
 
@@ -173,7 +173,7 @@ func (c *Client) outboundFlow(msg Message, dest net.Addr) (*packet, error) {
 	// Create a brand new message to initiate a transaction.
 	// The node in the Initiator role must allocate a new Exchange ID and always set the Initiator (`I`) flag.
 	// The message is bound to an established secure session.
-	req := NewRequest(c.session, msg.ProtocolID, msg.OpCode, msg.payload)
+	req := NewRequest(c.session, msg.ProtocolID, msg.OpCode, msg.Payload)
 	req.session = c.session
 	req.addr = dest // Set the destination address for the request
 
@@ -238,4 +238,121 @@ func (c *Client) inboundFlow() {
 			}
 		}
 	}
+}
+
+func (c *Client) Read(dest net.Addr, req ReadRequestMessage) (ReportDataMessage, error) {
+	msg := Message{
+		ProtocolID: ProtocolIDInteractionModel,
+		OpCode:     OpCodeReadRequest,
+		Payload:    req.Encode(),
+	}
+
+	resp, err := c.Request(dest, msg)
+	if err != nil {
+		return ReportDataMessage{}, err
+	}
+
+	c.logger.Debug("Received response", "msg", resp)
+
+	if resp.OpCode != OpCodeReportData {
+		return ReportDataMessage{}, fmt.Errorf("unexpected opcode: %v", resp.OpCode)
+	}
+
+	var out ReportDataMessage
+	if err := out.Decode(resp.Payload); err != nil {
+		return ReportDataMessage{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) Write(dest net.Addr, req WriteRequestMessage) (WriteResponseMessage, error) {
+	msg := Message{
+		ProtocolID: ProtocolIDInteractionModel,
+		OpCode:     OpCodeWriteRequest,
+		Payload:    req.Encode(),
+	}
+
+	resp, err := c.Request(dest, msg)
+	if err != nil {
+		return WriteResponseMessage{}, err
+	}
+
+	if resp.OpCode != OpCodeWriteResponse {
+		return WriteResponseMessage{}, fmt.Errorf("unexpected opcode: %v", resp.OpCode)
+	}
+
+	var out WriteResponseMessage
+	if err := out.Decode(resp.Payload); err != nil {
+		return WriteResponseMessage{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) Invoke(dest net.Addr, req InvokeRequestMessage) (InvokeResponseMessage, error) {
+	msg := Message{
+		ProtocolID: ProtocolIDInteractionModel,
+		OpCode:     OpCodeInvokeRequest,
+		Payload:    req.Encode(),
+	}
+
+	resp, err := c.Request(dest, msg)
+	if err != nil {
+		return InvokeResponseMessage{}, err
+	}
+
+	if resp.OpCode != OpCodeInvokeResponse {
+		return InvokeResponseMessage{}, fmt.Errorf("unexpected opcode: %v", resp.OpCode)
+	}
+
+	var out InvokeResponseMessage
+	if err := out.Decode(resp.Payload); err != nil {
+		return InvokeResponseMessage{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) Subscribe(dest net.Addr, req SubscribeRequestMessage) (SubscribeResponseMessage, error) {
+	msg := Message{
+		ProtocolID: ProtocolIDInteractionModel,
+		OpCode:     OpCodeSubscribeRequest,
+		Payload:    req.Encode(),
+	}
+
+	resp, err := c.Request(dest, msg)
+	if err != nil {
+		return SubscribeResponseMessage{}, err
+	}
+
+	if resp.OpCode != OpCodeSubscribeResponse {
+		return SubscribeResponseMessage{}, fmt.Errorf("unexpected opcode: %v", resp.OpCode)
+	}
+
+	var out SubscribeResponseMessage
+	if err := out.Decode(resp.Payload); err != nil {
+		return SubscribeResponseMessage{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) TimedRequest(dest net.Addr, req TimedRequestMessage) (StatusResponseMessage, error) {
+	msg := Message{
+		ProtocolID: ProtocolIDInteractionModel,
+		OpCode:     OpCodeTimedRequest,
+		Payload:    req.Encode(),
+	}
+
+	resp, err := c.Request(dest, msg)
+	if err != nil {
+		return StatusResponseMessage{}, err
+	}
+
+	if resp.OpCode != OpCodeStatusResponse {
+		return StatusResponseMessage{}, fmt.Errorf("unexpected opcode: %v", resp.OpCode)
+	}
+
+	var out StatusResponseMessage
+	if err := out.Decode(resp.Payload); err != nil {
+		return StatusResponseMessage{}, err
+	}
+	return out, nil
 }

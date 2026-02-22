@@ -13,7 +13,7 @@ import (
 )
 
 // temporary hack to tune the verbosity level of the the server.
-var serverNetworkLevel = slog.LevelWarn
+var serverNetworkLevel = slog.LevelDebug
 
 // MessageWriter allows the handler to write a response.
 type MessageWriter interface {
@@ -48,6 +48,14 @@ type Server struct {
 
 	// Handler to invoke, ServeMux is used if nil.
 	Handler Handler
+
+	// Interaction Model Handlers
+	ReadHandler         func(context.Context, ReadRequestMessage) (ReportDataMessage, error)
+	WriteHandler        func(context.Context, WriteRequestMessage) (WriteResponseMessage, error)
+	InvokeHandler       func(context.Context, InvokeRequestMessage) (InvokeResponseMessage, error)
+	SubscribeHandler    func(context.Context, SubscribeRequestMessage) (SubscribeResponseMessage, error)
+	TimedRequestHandler func(context.Context, TimedRequestMessage) (StatusResponseMessage, error)
+	ReportDataHandler   func(context.Context, ReportDataMessage) (StatusResponseMessage, error)
 
 	// BaseContext optionally specifies a function that returns the base context
 	// for incoming requests on this server.
@@ -144,11 +152,131 @@ func (s *Server) handle(msg packet, outbound chan<- packet) {
 		}
 	}
 	if !handled {
-		s.Handler.Serve(ctx, Message{
-			ProtocolID: msg.protocolHeader.ProtocolId,
-			OpCode:     msg.protocolHeader.Opcode,
-			payload:    msg.payload,
-		}, (*responseWriter)(&response))
+		if msg.protocolHeader.ProtocolId == ProtocolIDInteractionModel {
+			switch msg.protocolHeader.Opcode {
+			case OpCodeReadRequest:
+				if s.ReadHandler != nil {
+					var req ReadRequestMessage
+					if err := req.Decode(msg.payload); err != nil {
+						s.network.logger.Error("decode failed", "error", err)
+						return
+					}
+					resp, err := s.ReadHandler(ctx, req)
+					if err != nil {
+						s.network.logger.Error("handler failed", "error", err)
+						return
+					}
+					response = Message{
+						ProtocolID: ProtocolIDInteractionModel,
+						OpCode:     OpCodeReportData,
+						Payload:    resp.Encode(),
+					}
+					handled = true
+				}
+			case OpCodeWriteRequest:
+				if s.WriteHandler != nil {
+					var req WriteRequestMessage
+					if err := req.Decode(msg.payload); err != nil {
+						s.network.logger.Error("decode failed", "error", err)
+						return
+					}
+					resp, err := s.WriteHandler(ctx, req)
+					if err != nil {
+						s.network.logger.Error("handler failed", "error", err)
+						return
+					}
+					response = Message{
+						ProtocolID: ProtocolIDInteractionModel,
+						OpCode:     OpCodeWriteResponse,
+						Payload:    resp.Encode(),
+					}
+					handled = true
+				}
+			case OpCodeInvokeRequest:
+				if s.InvokeHandler != nil {
+					var req InvokeRequestMessage
+					if err := req.Decode(msg.payload); err != nil {
+						s.network.logger.Error("decode failed", "error", err)
+						return
+					}
+					resp, err := s.InvokeHandler(ctx, req)
+					if err != nil {
+						s.network.logger.Error("handler failed", "error", err)
+						return
+					}
+					response = Message{
+						ProtocolID: ProtocolIDInteractionModel,
+						OpCode:     OpCodeInvokeResponse,
+						Payload:    resp.Encode(),
+					}
+					handled = true
+				}
+			case OpCodeSubscribeRequest:
+				if s.SubscribeHandler != nil {
+					var req SubscribeRequestMessage
+					if err := req.Decode(msg.payload); err != nil {
+						s.network.logger.Error("decode failed", "error", err)
+						return
+					}
+					resp, err := s.SubscribeHandler(ctx, req)
+					if err != nil {
+						s.network.logger.Error("handler failed", "error", err)
+						return
+					}
+					response = Message{
+						ProtocolID: ProtocolIDInteractionModel,
+						OpCode:     OpCodeSubscribeResponse,
+						Payload:    resp.Encode(),
+					}
+					handled = true
+				}
+			case OpCodeTimedRequest:
+				if s.TimedRequestHandler != nil {
+					var req TimedRequestMessage
+					if err := req.Decode(msg.payload); err != nil {
+						s.network.logger.Error("decode failed", "error", err)
+						return
+					}
+					resp, err := s.TimedRequestHandler(ctx, req)
+					if err != nil {
+						s.network.logger.Error("handler failed", "error", err)
+						return
+					}
+					response = Message{
+						ProtocolID: ProtocolIDInteractionModel,
+						OpCode:     OpCodeStatusResponse,
+						Payload:    resp.Encode(),
+					}
+					handled = true
+				}
+			case OpCodeReportData:
+				if s.ReportDataHandler != nil {
+					var req ReportDataMessage
+					if err := req.Decode(msg.payload); err != nil {
+						s.network.logger.Error("decode failed", "error", err)
+						return
+					}
+					resp, err := s.ReportDataHandler(ctx, req)
+					if err != nil {
+						s.network.logger.Error("handler failed", "error", err)
+						return
+					}
+					response = Message{
+						ProtocolID: ProtocolIDInteractionModel,
+						OpCode:     OpCodeStatusResponse,
+						Payload:    resp.Encode(),
+					}
+					handled = true
+				}
+			}
+		}
+		if !handled && s.Handler != nil {
+			s.Handler.Serve(ctx, Message{
+				ProtocolID: msg.protocolHeader.ProtocolId,
+				OpCode:     msg.protocolHeader.Opcode,
+				Payload:    msg.payload,
+			}, (*responseWriter)(&response))
+		}
 	}
 
 	// response now contains that response, run the outbound flow to serialize and send the response back to the client.
@@ -309,7 +437,7 @@ func (s *Server) handleSigma1(req *packet) (Message, error) {
 	return Message{
 		ProtocolID: pkt.protocolHeader.ProtocolId,
 		OpCode:     pkt.protocolHeader.Opcode,
-		payload:    pkt.payload,
+		Payload:    pkt.payload,
 	}, nil
 }
 
@@ -337,5 +465,5 @@ func (s *Server) handleSigma3(req *packet) (Message, error) {
 	binary.Write(&buf, binary.LittleEndian, uint32(0)) // ProtocolId
 	binary.Write(&buf, binary.LittleEndian, uint16(0)) // ProtocolCode
 
-	return Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, payload: buf.Bytes()}, nil
+	return Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: buf.Bytes()}, nil
 }

@@ -10,7 +10,7 @@ import (
 type Message struct {
 	ProtocolID ProtocolID
 	OpCode     OpCode
-	payload    []byte
+	Payload    []byte
 }
 
 type ProtocolID uint16
@@ -90,67 +90,94 @@ const (
 
 )
 
-func (o OpCode) String() string {
-	switch o {
-	case OpCodeMsgCounterSyncReq:
-		return "MsgCounterSyncReq/IdentificationDeclaration"
-	case OpCodeMsgCounterSyncRsp:
-		return "MsgCounterSyncRsp/StatusResponse/SendInit/CommissionerDeclaration"
-	case OpCodeReadRequest:
-		return "ReadRequest/SendAccept"
-	case OpCodeSubscribeRequest:
-		return "SubscribeRequest"
-	case OpCodeSubscribeResponse:
-		return "SubscribeResponse/ReceiveInit"
-	case OpCodeReportData:
-		return "ReportData/ReceiveAccept"
-	case OpCodeWriteRequest:
-		return "WriteRequest"
-	case OpCodeWriteResponse:
-		return "WriteResponse"
-	case OpCodeInvokeRequest:
-		return "InvokeRequest"
-	case OpCodeInvokeResponse:
-		return "InvokeResponse"
-	case OpCodeTimedRequest:
-		return "TimedRequest"
-	case OpCodeMRPStandaloneAck:
-		return "MRPStandaloneAck/BlockQuery"
-	case OpCodeBDXBlock:
-		return "Block"
-	case OpCodeBDXBlockEOF:
-		return "BlockEOF"
-	case OpCodeBDXBlockAck:
-		return "BlockAck"
-	case OpCodeBDXBlockAckEOF:
-		return "BlockAckEOF"
-	case OpCodeBDXBlockQueryWithSkip:
-		return "BlockQueryWithSkip"
-	case OpCodePBKDFParamRequest:
-		return "PBKDFParamRequest"
-	case OpCodePBKDFParamResponse:
-		return "PBKDFParamResponse"
-	case OpCodePASEPake1:
-		return "PASEPake1"
-	case OpCodePASEPake2:
-		return "PASEPake2"
-	case OpCodePASEPake3:
-		return "PASEPake3"
-	case OpCodeCASESigma1:
-		return "CASESigma1"
-	case OpCodeCASESigma2:
-		return "CASESigma2"
-	case OpCodeCASESigma3:
-		return "CASESigma3"
-	case OpCodeCASESigma2Resume:
-		return "CASESigma2Resume"
-	case OpCodeStatusReport:
-		return "StatusReport"
-	case OpCodeICDCheckIn:
-		return "ICDCheckIn"
-	default:
-		return "Unknown " + fmt.Sprintf("%x", byte(o))
+func (o OpCode) String(pid ProtocolID) string {
+	switch pid {
+	case ProtocolIDSecureChannel:
+		switch o {
+		case OpCodeMsgCounterSyncReq:
+			return "MsgCounterSyncReq"
+		case OpCodeMsgCounterSyncRsp:
+			return "MsgCounterSyncRsp"
+		case OpCodeMRPStandaloneAck:
+			return "MRPStandaloneAck"
+		case OpCodePBKDFParamRequest:
+			return "PBKDFParamRequest"
+		case OpCodePBKDFParamResponse:
+			return "PBKDFParamResponse"
+		case OpCodePASEPake1:
+			return "PASEPake1"
+		case OpCodePASEPake2:
+			return "PASEPake2"
+		case OpCodePASEPake3:
+			return "PASEPake3"
+		case OpCodeCASESigma1:
+			return "CASESigma1"
+		case OpCodeCASESigma2:
+			return "CASESigma2"
+		case OpCodeCASESigma3:
+			return "CASESigma3"
+		case OpCodeCASESigma2Resume:
+			return "CASESigma2Resume"
+		case OpCodeStatusReport:
+			return "StatusReport"
+		case OpCodeICDCheckIn:
+			return "ICDCheckIn"
+		}
+	case ProtocolIDInteractionModel:
+		switch o {
+		case OpCodeStatusResponse:
+			return "StatusResponse"
+		case OpCodeReadRequest:
+			return "ReadRequest"
+		case OpCodeSubscribeRequest:
+			return "SubscribeRequest"
+		case OpCodeSubscribeResponse:
+			return "SubscribeResponse"
+		case OpCodeReportData:
+			return "ReportData"
+		case OpCodeWriteRequest:
+			return "WriteRequest"
+		case OpCodeWriteResponse:
+			return "WriteResponse"
+		case OpCodeInvokeRequest:
+			return "InvokeRequest"
+		case OpCodeInvokeResponse:
+			return "InvokeResponse"
+		case OpCodeTimedRequest:
+			return "TimedRequest"
+		}
+	case ProtocolIDBDX:
+		switch o {
+		case OpCodeBDXSendInit:
+			return "SendInit"
+		case OpCodeBDXSendAccept:
+			return "SendAccept"
+		case OpCodeBDXReceiveInit:
+			return "ReceiveInit"
+		case OpCodeBDXReceiveAccept:
+			return "ReceiveAccept"
+		case OpCodeBDXBlockQuery:
+			return "BlockQuery"
+		case OpCodeBDXBlock:
+			return "Block"
+		case OpCodeBDXBlockEOF:
+			return "BlockEOF"
+		case OpCodeBDXBlockAck:
+			return "BlockAck"
+		case OpCodeBDXBlockAckEOF:
+			return "BlockAckEOF"
+		case OpCodeBDXBlockQueryWithSkip:
+			return "BlockQueryWithSkip"
+		}
+	case ProtocolIDUserDirectedCommissioning:
+		switch o {
+		case OpCodeUDCIdentificationDeclaration:
+			return "IdentificationDeclaration"
+		case OpCodeUDCCommissionerDeclaration:
+			return "CommissionerDeclaration"
+		}
 	}
+	return "Unknown " + fmt.Sprintf("%x", byte(o))
 }
 
 const (

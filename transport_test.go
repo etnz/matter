@@ -20,7 +20,7 @@ func TestPhase1_PingPong(t *testing.T) {
 	serverConn := network.listenPacket(serverAddr)
 	handler := HandlerFunc(func(ctx context.Context, msg Message, w MessageWriter) {
 		// Handler replies PONG (whatever is the protoccol ID or opCode.)
-		w.Response(Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeInvokeResponse, payload: []byte("PONG")})
+		w.Response(Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeInvokeResponse, Payload: []byte("PONG")})
 	})
 
 	cm, err := NewGeneratedCertificateManager()
@@ -56,15 +56,15 @@ func TestPhase1_PingPong(t *testing.T) {
 	req := Message{
 		ProtocolID: ProtocolIDSecureChannel,
 		OpCode:     OpCodeInvokeRequest,
-		payload:    []byte("PING"),
+		Payload:    []byte("PING"),
 	}
 	resp, err := client.Request(&mockAddr{serverAddr}, req)
 	if err != nil {
 		t.Fatalf("client send failed: %v", err)
 	}
 
-	if !bytes.Equal(resp.payload, []byte("PONG")) {
-		t.Errorf("got %s, want PONG", string(resp.payload))
+	if !bytes.Equal(resp.Payload, []byte("PONG")) {
+		t.Errorf("got %s, want PONG", string(resp.Payload))
 	}
 }
 

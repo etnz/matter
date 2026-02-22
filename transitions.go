@@ -49,7 +49,7 @@ func (p packet) String() string {
 		p.header.SessionID,
 		p.header.MessageCounter,
 		p.protocolHeader.ProtocolId,
-		p.protocolHeader.Opcode,
+		p.protocolHeader.Opcode.String(p.protocolHeader.ProtocolId),
 		p.protocolHeader.ExchangeID,
 		len(p.payload),
 	)
@@ -234,7 +234,7 @@ func (p *packet) NewStandaloneAck() packet {
 func (m *packet) NewResponse(msg Message) packet {
 	p := packet{
 		addr:    m.addr,
-		payload: msg.payload,
+		payload: msg.Payload,
 		session: m.session,
 	}
 
