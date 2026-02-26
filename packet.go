@@ -8,20 +8,11 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/etnz/matter/securechannel"
 	"github.com/tom-code/gomat/ccm"
 )
 
-// TODO: find a standard ccm implementation.
-
-// sessionContext holds the state for a secure session.
-type sessionContext struct {
-	ID             uint16
-	RemoteNodeID   uint64
-	MessageCounter uint32
-	EncryptionKey  []byte
-	DecryptionKey  []byte
-	caseCtx        *CASEContext
-}
+// TODO: use a standard ccm implementation after https://github.com/golang/go/issues/27484
 
 // messageReceptionState tracks received message counters for replay protection.
 type messageReceptionState struct {
@@ -37,10 +28,10 @@ type packet struct {
 	addr    net.Addr // Source or destination address, depending on the direction of the message.
 	payload []byte   // The message payload as read from the network or to be written to the network.
 	//resp           chan<- Packet         // Communication to respond to this message, if applicable.
-	header         messageHeader         // Unencrypted message header
-	protocolHeader protocolMessageHeader // Encrypted/Decrypted protocol header
-	session        *sessionContext       // The session associated with this packet
-	isEncrypted    bool                  // Whether the payload is already encrypted
+	header         messageHeader                 // Unencrypted message header
+	protocolHeader protocolMessageHeader         // Encrypted/Decrypted protocol header
+	session        *securechannel.SessionContext // The session associated with this packet
+	isEncrypted    bool                          // Whether the payload is already encrypted
 }
 
 func (p packet) String() string {
@@ -73,7 +64,7 @@ func (p *packet) WriteTo(pc net.PacketConn) (int, error) {
 // NewRequest creates a brand new message to initiate a transaction (e.g., a Read, Write, or Invoke request) from the client.
 // The node in the Initiator role must allocate a new Exchange ID and always set the Initiator (`I`) flag in the Exchange Flags.
 // The message is bound to an established secure session.
-func NewRequest(sessionCtx *sessionContext, protocolID ProtocolID, opCode OpCode, payload []byte) *packet {
+func NewRequest(sessionCtx *securechannel.SessionContext, protocolID ProtocolID, opCode OpCode, payload []byte) *packet {
 	var exchangeID uint16
 	binary.Read(rand.Reader, binary.LittleEndian, &exchangeID)
 	pkt := &packet{
@@ -93,25 +84,6 @@ func NewRequest(sessionCtx *sessionContext, protocolID ProtocolID, opCode OpCode
 		pkt.header.SessionID = sessionCtx.ID
 	}
 	return pkt
-}
-
-// NewPBKDFParamRequest generates the very first message of the Passcode-Authenticated Session Establishment (PASE) protocol.
-// It uses an Unsecured Session context and packs a 32-byte `InitiatorRandom` and an `InitiatorSessionId` into the payload.
-// The Protocol Opcode is set to 0x20.
-func NewPBKDFParamRequest(passcodeID uint16, hasPBKDFParameters bool) *packet {
-	return &packet{}
-}
-
-// NewPake1 generates the subsequent client-side steps of the PASE handshake.
-// `Pake1` (Opcode 0x22) transmits the initiator's ephemeral public key (`pA`).
-func NewPake1(pA []byte) *packet {
-	return &packet{}
-}
-
-// NewPake3 generates the subsequent client-side steps of the PASE handshake.
-// `Pake3` (Opcode 0x24) transmits the initiator's confirmation hash (`cA`) to prove knowledge of the derived shared secret.
-func NewPake3(cA []byte) *packet {
-	return &packet{}
 }
 
 // 2. Inbound Transitions (Datagram → App Payload)
@@ -282,7 +254,7 @@ func (p *packet) PiggybackAck(pendingAckMsgCounter uint32) error {
 
 // AssignMessageCounter allocates a monotonically increasing 32-bit counter from the Local Message Counter state within the Secure Session context.
 // The counter is injected into the header and acts as the nonce for AES-CCM encryption.
-func (p *packet) AssignMessageCounter(sessionCtx *sessionContext) error {
+func (p *packet) AssignMessageCounter(sessionCtx *securechannel.SessionContext) error {
 	sessionCtx.MessageCounter++
 	p.header.MessageCounter = sessionCtx.MessageCounter
 	return nil

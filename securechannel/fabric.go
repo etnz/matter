@@ -1,4 +1,4 @@
-package matter
+package securechannel
 
 import (
 	"crypto/ecdsa"
@@ -11,13 +11,11 @@ import (
 	"time"
 )
 
-// TODO: clarify the different assets to be provided, and when and who should provide them (e.g. a controller has more assets than a device) etc.
-
 // CertificateManager manages certificates and keys for a Fabric.
 type CertificateManager interface {
-	GetRootPublicKey() []byte
-	GetCertificate(nodeID uint64) (*x509.Certificate, error)
-	GetPrivkey(nodeID uint64) (*ecdsa.PrivateKey, error)
+	PublicKey() []byte
+	Certificate(nodeID uint64) (*x509.Certificate, error)
+	PrivateKey(nodeID uint64) (*ecdsa.PrivateKey, error)
 }
 
 // Fabric represents a Matter Fabric.
@@ -38,8 +36,20 @@ func NewFabric(id uint64, nodeID uint64, ipk []byte, certManager CertificateMana
 	}
 }
 
+func (f *Fabric) IPK() []byte           { return f.ipk }
+func (f *Fabric) ID() uint64            { return f.id }
+func (f *Fabric) NodeID() uint64        { return f.nodeID }
+func (f *Fabric) RootPublicKey() []byte { return f.CertificateManager.PublicKey() }
+func (f *Fabric) Certificate(nodeID uint64) (*x509.Certificate, error) {
+	return f.CertificateManager.Certificate(nodeID)
+}
+func (f *Fabric) PrivateKey(nodeID uint64) (*ecdsa.PrivateKey, error) {
+	return f.CertificateManager.PrivateKey(nodeID)
+}
+
 // SerializeCertificateIntoMatter converts an X.509 certificate to the Matter TLV format.
 func (f *Fabric) SerializeCertificateIntoMatter(cert *x509.Certificate) []byte {
+	// TODO: implement proper certificate serialization according to Matter specifications.
 	// Placeholder for certificate serialization logic.
 	// In a real implementation, this would convert the X.509 cert to Matter's TLV format.
 	// For now, we return the raw DER bytes as a placeholder, or a dummy value.
@@ -50,6 +60,7 @@ func (f *Fabric) SerializeCertificateIntoMatter(cert *x509.Certificate) []byte {
 }
 
 // MemCertificateManager is an in-memory certificate manager that generates keys and certificates.
+// This is a simple implementation for testing purposes and should not be used in production as it does not persist any data.
 type MemCertificateManager struct {
 	RootKey   *ecdsa.PrivateKey
 	RootCert  *x509.Certificate
@@ -94,11 +105,11 @@ func NewGeneratedCertificateManager() (*MemCertificateManager, error) {
 	}, nil
 }
 
-func (m *MemCertificateManager) GetRootPublicKey() []byte {
+func (m *MemCertificateManager) PublicKey() []byte {
 	return elliptic.Marshal(m.RootKey.Curve, m.RootKey.X, m.RootKey.Y)
 }
 
-func (m *MemCertificateManager) GetCertificate(nodeID uint64) (*x509.Certificate, error) {
+func (m *MemCertificateManager) Certificate(nodeID uint64) (*x509.Certificate, error) {
 	if cert, ok := m.NodeCerts[nodeID]; ok {
 		return cert, nil
 	}
@@ -134,11 +145,11 @@ func (m *MemCertificateManager) GetCertificate(nodeID uint64) (*x509.Certificate
 	return cert, nil
 }
 
-func (m *MemCertificateManager) GetPrivkey(nodeID uint64) (*ecdsa.PrivateKey, error) {
+func (m *MemCertificateManager) PrivateKey(nodeID uint64) (*ecdsa.PrivateKey, error) {
 	if key, ok := m.NodeKeys[nodeID]; ok {
 		return key, nil
 	}
-	if _, err := m.GetCertificate(nodeID); err != nil {
+	if _, err := m.Certificate(nodeID); err != nil {
 		return nil, err
 	}
 	return m.NodeKeys[nodeID], nil

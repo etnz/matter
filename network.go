@@ -10,7 +10,7 @@ type network struct {
 	logger *slog.Logger
 }
 
-func (s *network) readLoop(pc net.PacketConn, outbound chan packet, inbound chan<- packet) error {
+func (s *network) readLoop(pc net.PacketConn, inbound chan<- packet) error {
 
 	buf := make([]byte, 4096) // Standard MTU safe buffer
 
@@ -60,7 +60,7 @@ func (s *network) new(pc net.PacketConn) *connection {
 		inbound:  make(chan packet, 10),
 		outbound: make(chan packet, 10),
 	}
-	go s.readLoop(pc, conn.outbound, conn.inbound)
+	go s.readLoop(pc, conn.inbound)
 	go s.writeLoop(pc, conn.outbound)
 	return conn
 }

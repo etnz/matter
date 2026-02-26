@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/etnz/matter/securechannel"
 )
 
 // TestPhase1_PingPong verifies the Phase 1 requirement:
@@ -23,12 +25,12 @@ func Test_PingPong(t *testing.T) {
 		w.Response(Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeInvokeResponse, Payload: []byte("PONG")})
 	})
 
-	cm, err := NewGeneratedCertificateManager()
+	cm, err := securechannel.NewGeneratedCertificateManager()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ipk := make([]byte, 16)
-	fabric := NewFabric(1, 1, ipk, cm)
+	fabric := securechannel.NewFabric(1, 1, ipk, cm)
 	server := &Server{
 		Handler: handler,
 		Fabric:  fabric,
@@ -43,11 +45,10 @@ func Test_PingPong(t *testing.T) {
 
 	// 2. Setup Client
 	clientConn := network.listenPacket("client:1234")
-	clientFabric := NewFabric(1, 2, ipk, cm)
-	client := &Client{
-		Transport:   clientConn,
-		PeerAddress: &mockAddr{serverAddr},
-		Fabric:      clientFabric,
+	clientFabric := securechannel.NewFabric(1, 2, ipk, cm)
+	client, err := NewCommissionedClient(clientConn, &mockAddr{serverAddr}, clientFabric)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
 	}
 
 	// 3. Execute Test
@@ -83,11 +84,11 @@ func Test_PASEPingPong(t *testing.T) {
 	})
 
 	passcode := uint32(12345678) // factory passcode for the device.
-	cm, err := NewGeneratedCertificateManager()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ipk := make([]byte, 16)
+	// cm, err := NewGeneratedCertificateManager()
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	// ipk := make([]byte, 16)
 	//fabric := NewFabric(1, 1, ipk, cm)
 	server := &Server{
 		Handler: handler,
@@ -104,15 +105,10 @@ func Test_PASEPingPong(t *testing.T) {
 
 	// 2. Setup Client
 	clientConn := network.listenPacket("client:1234")
-	clientFabric := NewFabric(1, 2, ipk, cm)
-	client := &Client{
-		Transport:   clientConn,
-		PeerAddress: &mockAddr{serverAddr},
-		Fabric:      clientFabric,
-	}
-
-	// Execute PASE flow to establish session and fabric.
-	if err := client.ConnectWithPasscode(passcode); err != nil {
+	// clientFabric := NewFabric(1, 2, ipk, cm)
+	// _ = clientFabric
+	client, err := NewPasscodeClient(clientConn, &mockAddr{serverAddr}, passcode)
+	if err != nil {
 		t.Fatalf("PASE flow failed: %v", err)
 	}
 

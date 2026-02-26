@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/etnz/matter/securechannel"
 )
 
 // Client is a Matter client to exchange with a single peer node.
@@ -15,25 +17,51 @@ import (
 type Client struct {
 	network
 
-	// the Fabric used to communicate with the peer.
-	Fabric *Fabric
-	// PeerAddress used to echange with the Peer Node.
-	PeerAddress net.Addr
+	// peerAddress used to echange with the Peer Node.
+	peerAddress net.Addr
 
-	// Transport specifies the mechanism by which individual requests are exchanged.
+	// the fabric used to communicate with the peer.
+	fabric *securechannel.Fabric
+
+	// transport specifies the mechanism by which individual requests are exchanged.
 	// If nil, a new ephemeral net.PacketConn is created.
-	Transport net.PacketConn
+	transport net.PacketConn
 
 	// chan based network connection for the client to send and receive messages to/from the network layer.
 	conn *connection
 
 	initOnce sync.Once
-	session  *sessionContext
+	session  *securechannel.SessionContext
 
 	exchanges sync.Map
 }
 
 var clientNetworkLevel = slog.LevelDebug
+
+// NewCommissionedClient creates a new Client for a commissioned node.
+func NewCommissionedClient(transport net.PacketConn, peerAddress net.Addr, fabric *securechannel.Fabric) (*Client, error) {
+	c := &Client{
+		transport:   transport,
+		peerAddress: peerAddress,
+		fabric:      fabric,
+	}
+	if err := c.ConnectWithFabric(fabric); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// NewPasscodeClient creates a new Client using a passcode (PASE).
+func NewPasscodeClient(transport net.PacketConn, peerAddress net.Addr, passcode uint32) (*Client, error) {
+	c := &Client{
+		transport:   transport,
+		peerAddress: peerAddress,
+	}
+	if err := c.ConnectWithPasscode(passcode); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
 
 func (c *Client) init() {
 	c.initOnce.Do(func() {
@@ -41,27 +69,27 @@ func (c *Client) init() {
 			Level: clientNetworkLevel,
 		})).With("agent", "client")
 
-		if c.Transport == nil {
+		if c.transport == nil {
 			var err error
-			c.Transport, err = net.ListenPacket("udp", ":")
+			c.transport, err = net.ListenPacket("udp", ":")
 			if err != nil {
 				panic(fmt.Sprintf("failed to create default transport: %v", err))
 			}
 		}
 		// open up the  chan based network connection.
-		c.conn = c.network.new(c.Transport)
+		c.conn = c.network.new(c.transport)
 		go c.inboundFlow()
 	})
 }
 
+// Request executes a request-response transaction with the peer node.
+// A secure connection must have been established (e.g. via ConnectWithPasscode or ConnectWithCertificate) before calling this method.
 func (c *Client) Request(msg Message) (resp Message, err error) {
 	c.init()
 
 	// Check if we need to bootstrap (Logic: if no session)
 	if c.session == nil {
-		if err := c.executeCASEFlow(); err != nil {
-			return Message{}, err
-		}
+		return Message{}, fmt.Errorf("no session established")
 	}
 
 	respChan := make(chan packet, 1)
@@ -92,42 +120,43 @@ func (c *Client) Request(msg Message) (resp Message, err error) {
 	}, nil
 }
 
-func (c *Client) executeCASEFlow() error {
+func (c *Client) ConnectWithFabric(f *securechannel.Fabric) error {
+	c.fabric = f
+	c.init()
 	if c.session != nil {
-		return nil
+		c.session = nil // Clear any existing session
 	}
-	// 1. Bootstrapping Client Outbound (Initiating CASE)
-	// Transformation (NewSigma1)
-	// The client's Secure Channel Protocol handler generates a Sigma1 message.
-	caseCtx := &CASEContext{Fabric: c.Fabric}
-	sigma1 := caseCtx.GenerateSigma1()
-	sigma1.addr = c.PeerAddress
+	// Bootstrapping Client Outbound (Initiating CASE)
+	c.logger.Debug("CASE sending Sigma1")
+	caseCtx := &securechannel.CASEContext{Fabric: c.fabric}
+	sigma1Payload, err := caseCtx.GenerateSigma1()
+	if err != nil {
+		return err
+	}
 
-	// Transition (AssignMessageCounter)
+	sigma1 := NewRequest(nil, ProtocolIDSecureChannel, OpCodeCASESigma1, sigma1Payload)
+	sigma1.addr = c.peerAddress
+
+	//  AssignMessageCounter
 	// Because this is an Unsecured Session, the stack uses and increments the Global Unencrypted Message Counter.
-	unsecuredSession := &sessionContext{ID: 0}
+	unsecuredSession := &securechannel.SessionContext{ID: 0}
 	if err := sigma1.AssignMessageCounter(unsecuredSession); err != nil {
 		return err
 	}
 
 	// Register the response channel for Sigma2
-	resp := make(chan packet, 1)
+	resp := make(chan packet, 2) // Need space for Sigma2 and StatusReport
 	c.exchanges.Store(sigma1.protocolHeader.ExchangeID, resp)
 	defer func() {
 		c.exchanges.Delete(sigma1.protocolHeader.ExchangeID)
 	}()
 
-	// Transition (Bypass Encryption)
-	// The message bypasses standard AEAD encryption and privacy obfuscation since it is sent unencrypted over the network.
+	c.conn.outbound <- *sigma1
 
-	if _, err := sigma1.WriteTo(c.Transport); err != nil {
-		return err
-	}
-
-	// 4. Bootstrapping Client Inbound (Receiving Sigma2 & Finishing)
+	// Wait for Sigma2.
 	var rp packet
 	select {
-	case rp = <-resp:
+	case rp = <-resp: // Sigma2
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("timeout waiting for Sigma2")
 	}
@@ -135,43 +164,52 @@ func (c *Client) executeCASEFlow() error {
 	// Check if it is an unencrypted message (Session ID 0)
 	if rp.header.SessionID == 0 {
 		if rp.protocolHeader.Opcode == OpCodeCASESigma2 {
-			sigma3, peerSessionID, err := caseCtx.ParseSigma2(rp.payload)
+			sigma3Payload, peerSessionID, err := caseCtx.ParseSigma2(rp.payload)
 			if err != nil {
 				return err
 			}
 			// Transformation (NewSigma3)
-			// If the server is authenticated, the client generates a Sigma3 message.
-			sigma3.addr = c.PeerAddress
+			c.logger.Debug("CASE send Sigma3")
+			sigma3 := rp.NewResponse(Message{
+				ProtocolID: ProtocolIDSecureChannel,
+				OpCode:     OpCodeCASESigma3,
+				Payload:    sigma3Payload,
+			})
 
 			// Handshake complete: Initialize the secure session immediately so we can decrypt SigmaFinished
 			encKey, decKey := caseCtx.SessionKeys()
-			c.session = &sessionContext{
+			c.session = &securechannel.SessionContext{
 				ID:            peerSessionID,
 				EncryptionKey: encKey,
 				DecryptionKey: decKey,
 			}
 
-			// Key Derivation and sending Sigma3
-			// It transmits Sigma3 to the server.
-			if _, err := sigma3.WriteTo(c.Transport); err != nil {
+			sigma3.header.SessionID = peerSessionID
+			if err := sigma3.AssignMessageCounter(c.session); err != nil {
 				return err
 			}
+
+			c.conn.outbound <- sigma3
 
 			// Wait for SigmaFinished (Status Report)
 			var rpFinished packet
 			select {
 			case rpFinished = <-resp:
 			case <-time.After(5 * time.Second):
+				c.session = nil // Clear session on failure
 				return fmt.Errorf("timeout waiting for SigmaFinished")
 			}
 			if rpFinished.protocolHeader.Opcode != OpCodeStatusReport {
+				c.session = nil // Clear session on failure
 				return fmt.Errorf("unexpected message: %v", rpFinished.protocolHeader.Opcode)
 			}
 
 			return nil
+		} else {
+			return fmt.Errorf("unexpected message during bootstrapping: %v", rp.protocolHeader.Opcode.String(rp.protocolHeader.ProtocolId))
 		}
 	}
-	return fmt.Errorf("unexpected message during bootstrapping")
+	return fmt.Errorf("unexpected session message during bootstrapping: %v", rp)
 }
 
 // ConnectWithPasscode initiates the PASE commissioning flow with the given passcode.
@@ -180,18 +218,23 @@ func (c *Client) ConnectWithPasscode(passcode uint32) error {
 	if c.session != nil {
 		return nil
 	}
-
-	paseCtx := &PASEContext{Passcode: passcode}
+	// creates a PASE context.
+	paseCtx := &securechannel.PASEContext{Passcode: passcode}
 
 	// 1. PBKDFParamRequest
-	req := paseCtx.GeneratePBKDFParamRequest()
-	req.addr = c.PeerAddress
+	payload, err := paseCtx.GeneratePBKDFParamRequest()
+	if err != nil {
+		return err
+	}
+	req := NewRequest(nil, ProtocolIDSecureChannel, OpCodePBKDFParamRequest, payload)
+	req.addr = c.peerAddress
 
 	// Assign message counter for unsecured session
-	unsecuredSession := &sessionContext{ID: 0}
+	unsecuredSession := &securechannel.SessionContext{ID: 0}
 	if err := req.AssignMessageCounter(unsecuredSession); err != nil {
 		return err
 	}
+	paseCtx.ExchangeID = req.protocolHeader.ExchangeID
 
 	// Register response channel
 	respChan := make(chan packet, 1)
@@ -200,11 +243,10 @@ func (c *Client) ConnectWithPasscode(passcode uint32) error {
 		c.exchanges.Delete(req.protocolHeader.ExchangeID)
 	}()
 
-	if _, err := req.WriteTo(c.Transport); err != nil {
-		return err
-	}
+	// send the PBKDFParamRequest
+	c.conn.outbound <- *req
 
-	// 2. Wait for PBKDFParamResponse
+	// Wait for PBKDFParamResponse
 	var resp packet
 	select {
 	case resp = <-respChan:
@@ -217,20 +259,22 @@ func (c *Client) ConnectWithPasscode(passcode uint32) error {
 	}
 
 	// 3. Generate Pake1
-	pake1, err := paseCtx.ParsePBKDFParamResponseAndGeneratePake1(resp.payload)
+	pake1Payload, err := paseCtx.ParsePBKDFParamResponseAndGeneratePake1(resp.payload)
 	if err != nil {
 		return err
 	}
-	pake1.addr = c.PeerAddress
+	pake1 := resp.NewResponse(Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodePASEPake1,
+		Payload:    pake1Payload,
+	})
 	if err := pake1.AssignMessageCounter(unsecuredSession); err != nil {
 		return err
 	}
 
-	if _, err := pake1.WriteTo(c.Transport); err != nil {
-		return err
-	}
+	c.conn.outbound <- pake1
 
-	// 4. Wait for Pake2
+	// Wait for Pake2
 	select {
 	case resp = <-respChan:
 	case <-time.After(5 * time.Second):
@@ -241,37 +285,43 @@ func (c *Client) ConnectWithPasscode(passcode uint32) error {
 		return fmt.Errorf("unexpected opcode: %v", resp.protocolHeader.Opcode)
 	}
 
-	// 5. Generate Pake3
-	pake3, peerSessionID, err := paseCtx.ParsePake2AndGeneratePake3(resp.payload)
+	// Generate Pake3
+	pake3Payload, peerSessionID, err := paseCtx.ParsePake2AndGeneratePake3(resp.payload)
 	if err != nil {
 		return err
 	}
-	pake3.addr = c.PeerAddress
+	pake3 := resp.NewResponse(Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodePASEPake3,
+		Payload:    pake3Payload,
+	})
 	if err := pake3.AssignMessageCounter(unsecuredSession); err != nil {
 		return err
 	}
 
-	if _, err := pake3.WriteTo(c.Transport); err != nil {
-		return err
+	// 7. Derive keys and set session
+	// We need to establish the session before receiving the StatusReport,
+	// because the StatusReport is encrypted with the new session keys.
+	encKey, decKey, _ := paseCtx.SessionKeys()
+	c.session = &securechannel.SessionContext{
+		ID:            peerSessionID,
+		EncryptionKey: encKey,
+		DecryptionKey: decKey,
 	}
 
-	// 6. Wait for StatusReport
+	c.conn.outbound <- pake3
+
+	// Wait for StatusReport
 	select {
 	case resp = <-respChan:
 	case <-time.After(5 * time.Second):
+		c.session = nil // Clear session on failure
 		return fmt.Errorf("timeout waiting for StatusReport")
 	}
 
 	if resp.protocolHeader.Opcode != OpCodeStatusReport {
+		c.session = nil // Clear session on failure
 		return fmt.Errorf("unexpected opcode: %v", resp.protocolHeader.Opcode)
-	}
-
-	// 7. Derive keys and set session
-	encKey, decKey, _ := paseCtx.SessionKeys()
-	c.session = &sessionContext{
-		ID:            peerSessionID,
-		EncryptionKey: encKey,
-		DecryptionKey: decKey,
 	}
 
 	return nil
@@ -284,7 +334,7 @@ func (c *Client) outboundFlow(msg Message) (*packet, error) {
 	// The message is bound to an established secure session.
 	req := NewRequest(c.session, msg.ProtocolID, msg.OpCode, msg.Payload)
 	req.session = c.session
-	req.addr = c.PeerAddress // Set the destination address for the request
+	req.addr = c.peerAddress // Set the destination address for the request
 
 	// Transition (Reliability Setup)
 	// If the message is being dispatched over an unreliable transport like UDP, the Reliability (`R`) flag is set.
@@ -304,7 +354,7 @@ func (c *Client) outboundFlow(msg Message) (*packet, error) {
 	}
 
 	// Send the packet to the network
-	if _, err := req.WriteTo(c.Transport); err != nil {
+	if _, err := req.WriteTo(c.transport); err != nil {
 		return nil, err
 	}
 	return req, nil
@@ -355,7 +405,7 @@ func (c *Client) Read(req ReadRequestMessage) (ReportDataMessage, error) {
 	msg := Message{
 		ProtocolID: ProtocolIDInteractionModel,
 		OpCode:     OpCodeReadRequest,
-		Payload:    req.Encode(),
+		Payload:    req.Encode().Bytes(),
 	}
 
 	resp, err := c.Request(msg)
@@ -380,7 +430,7 @@ func (c *Client) Write(req WriteRequestMessage) (WriteResponseMessage, error) {
 	msg := Message{
 		ProtocolID: ProtocolIDInteractionModel,
 		OpCode:     OpCodeWriteRequest,
-		Payload:    req.Encode(),
+		Payload:    req.Encode().Bytes(),
 	}
 
 	resp, err := c.Request(msg)
@@ -403,7 +453,7 @@ func (c *Client) Invoke(req InvokeRequestMessage) (InvokeResponseMessage, error)
 	msg := Message{
 		ProtocolID: ProtocolIDInteractionModel,
 		OpCode:     OpCodeInvokeRequest,
-		Payload:    req.Encode(),
+		Payload:    req.Encode().Bytes(),
 	}
 
 	resp, err := c.Request(msg)
@@ -426,7 +476,7 @@ func (c *Client) Subscribe(req SubscribeRequestMessage) (SubscribeResponseMessag
 	msg := Message{
 		ProtocolID: ProtocolIDInteractionModel,
 		OpCode:     OpCodeSubscribeRequest,
-		Payload:    req.Encode(),
+		Payload:    req.Encode().Bytes(),
 	}
 
 	resp, err := c.Request(msg)
@@ -449,7 +499,7 @@ func (c *Client) TimedRequest(req TimedRequestMessage) (StatusResponseMessage, e
 	msg := Message{
 		ProtocolID: ProtocolIDInteractionModel,
 		OpCode:     OpCodeTimedRequest,
-		Payload:    req.Encode(),
+		Payload:    req.Encode().Bytes(),
 	}
 
 	resp, err := c.Request(msg)
@@ -467,7 +517,5 @@ func (c *Client) TimedRequest(req TimedRequestMessage) (StatusResponseMessage, e
 	}
 	return out, nil
 }
-
-// TODO: We need a special method to initiate the commisioning. It must take the passcode, put it in the PASEContext and kick the bootstrapping flow.
 
 // TODO: we don't have the MRP flow implemented yet (regression).
