@@ -7,18 +7,18 @@ import (
 
 func TestSecureChannel_EncodeDecode(t *testing.T) {
 	t.Run("PBKDFParamRequest", func(t *testing.T) {
-		in := PBKDFParamRequest{
+		in := pbkdfParamRequest{
 			InitiatorRandom:    []byte("random12345678901234567890123456"),
 			InitiatorSessionID: 0x1234,
 			PasscodeID:         0x5678,
 			HasPBKDFParameters: true,
-			PBKDFParameters: &PBKDFParameters{
+			PBKDFParameters: &pbkdfParameters{
 				Iterations: 1000,
 				Salt:       []byte("salt123456789012"),
 			},
 		}
 		encoded := in.Encode().Bytes()
-		var out PBKDFParamRequest
+		var out pbkdfParamRequest
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -28,17 +28,17 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("PBKDFParamResponse", func(t *testing.T) {
-		in := PBKDFParamResponse{
+		in := pbkdfParamResponse{
 			InitiatorRandom:    []byte("init_random_32_bytes_long_string"),
 			ResponderRandom:    []byte("resp_random_32_bytes_long_string"),
 			ResponderSessionID: 0xABCD,
-			PBKDFParameters: &PBKDFParameters{
+			PBKDFParameters: &pbkdfParameters{
 				Iterations: 2000,
 				Salt:       []byte("salt_16_bytes_xx"),
 			},
 		}
 		encoded := in.Encode().Bytes()
-		var out PBKDFParamResponse
+		var out pbkdfParamResponse
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -48,11 +48,11 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("Pake1", func(t *testing.T) {
-		in := Pake1{
+		in := pake1{
 			PA: []byte("public_key_a"),
 		}
 		encoded := in.Encode().Bytes()
-		var out Pake1
+		var out pake1
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -62,12 +62,12 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("Pake2", func(t *testing.T) {
-		in := Pake2{
+		in := pake2{
 			PB: []byte("public_key_b"),
 			CB: []byte("confirmation_b"),
 		}
 		encoded := in.Encode().Bytes()
-		var out Pake2
+		var out pake2
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -77,11 +77,11 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("Pake3", func(t *testing.T) {
-		in := Pake3{
+		in := pake3{
 			CA: []byte("confirmation_a"),
 		}
 		encoded := in.Encode().Bytes()
-		var out Pake3
+		var out pake3
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("CASESigma1", func(t *testing.T) {
-		in := CASESigma1{
+		in := caseSigma1{
 			InitiatorRandom:    []byte("initiator_random"),
 			InitiatorSessionID: 0x1111,
 			DestinationID:      []byte("dest_id"),
@@ -100,7 +100,7 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 			ResumeMIC:          []byte("resume_mic"),
 		}
 		encoded := in.Encode().Bytes()
-		var out CASESigma1
+		var out caseSigma1
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -110,14 +110,14 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("CASESigma2", func(t *testing.T) {
-		in := CASESigma2{
+		in := caseSigma2{
 			ResponderRandom:    []byte("responder_random"),
 			ResponderSessionID: 0x2222,
 			ResponderEphPubKey: []byte("responder_pub_key"),
 			Encrypted:          []byte("encrypted_data"),
 		}
 		encoded := in.Encode().Bytes()
-		var out CASESigma2
+		var out caseSigma2
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -127,14 +127,14 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("CASESigma2Signed", func(t *testing.T) {
-		in := CASESigma2Signed{
+		in := caseSigma2Signed{
 			ResponderNOC:  []byte("responder_noc"),
 			ResponderICAC: []byte("responder_icac"),
 			Signature:     []byte("signature"),
 			ResumptionID:  []byte("resumption_id"),
 		}
 		encoded := in.Encode().Bytes()
-		var out CASESigma2Signed
+		var out caseSigma2Signed
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -144,11 +144,11 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("CASESigma3", func(t *testing.T) {
-		in := CASESigma3{
+		in := caseSigma3{
 			Encrypted: []byte("encrypted_sigma3"),
 		}
 		encoded := in.Encode().Bytes()
-		var out CASESigma3
+		var out caseSigma3
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}
@@ -158,13 +158,13 @@ func TestSecureChannel_EncodeDecode(t *testing.T) {
 	})
 
 	t.Run("CASESigma3Signed", func(t *testing.T) {
-		in := CASESigma3Signed{
+		in := caseSigma3Signed{
 			InitiatorNOC:  []byte("initiator_noc"),
 			InitiatorICAC: []byte("initiator_icac"),
 			Signature:     []byte("signature"),
 		}
 		encoded := in.Encode().Bytes()
-		var out CASESigma3Signed
+		var out caseSigma3Signed
 		if err := out.Decode(encoded); err != nil {
 			t.Fatalf("Decode failed: %v", err)
 		}

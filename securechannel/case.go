@@ -15,8 +15,8 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// CASEContext manages the state of a Certificate Authenticated Session Establishment handshake.
-type CASEContext struct {
+// caseContext manages the state of a Certificate Authenticated Session Establishment handshake.
+type caseContext struct {
 	InitiatorSessionID uint16
 	ResponderSessionID uint16
 	InitiatorRandom    []byte
@@ -30,30 +30,8 @@ type CASEContext struct {
 	Fabric             *Fabric
 }
 
-// NewServerSessionFromSigma1 creates a new SessionContext for a responder, parses the Sigma1 payload,
-// sets the responder session ID, and generates the Sigma2 payload.
-func NewServerSessionFromSigma1(fabric *Fabric, sigma1Payload []byte) (*SessionContext, []byte, error) {
-	caseCtx := &CASEContext{Fabric: fabric}
-	if err := caseCtx.ParseSigma1(sigma1Payload); err != nil {
-		return nil, nil, err
-	}
-	// initiate a new session for the CASE exchange.
-	var newSessionID uint16
-	binary.Read(rand.Reader, binary.LittleEndian, &newSessionID)
-
-	caseCtx.ResponderSessionID = newSessionID
-	payload, err := caseCtx.GenerateSigma2()
-	if err != nil {
-		return nil, nil, err
-	}
-	return &SessionContext{
-		ID:      caseCtx.ResponderSessionID,
-		CaseCtx: caseCtx,
-	}, payload, nil
-}
-
-// GenerateSigma1 generates the Sigma1 Packet payload.
-func (c *CASEContext) GenerateSigma1() ([]byte, error) {
+// generateSigma1 generates the Sigma1 Packet payload.
+func (c *caseContext) generateSigma1() ([]byte, error) {
 	var err error
 	c.InitiatorEphKey, err = ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
@@ -73,7 +51,7 @@ func (c *CASEContext) GenerateSigma1() ([]byte, error) {
 		}
 	}
 
-	msg := CASESigma1{
+	msg := caseSigma1{
 		InitiatorRandom:    c.InitiatorRandom,
 		InitiatorSessionID: c.InitiatorSessionID,
 	}
@@ -102,9 +80,9 @@ func (c *CASEContext) GenerateSigma1() ([]byte, error) {
 	return payload, nil
 }
 
-// ParseSigma1 processes the incoming Sigma1 message (Server side).
-func (c *CASEContext) ParseSigma1(payload []byte) error {
-	var msg CASESigma1
+// parseSigma1 processes the incoming Sigma1 message (Server side).
+func (c *caseContext) parseSigma1(payload []byte) error {
+	var msg caseSigma1
 	var err error
 	if err := msg.Decode(payload); err != nil {
 		return err
@@ -119,8 +97,8 @@ func (c *CASEContext) ParseSigma1(payload []byte) error {
 	return nil
 }
 
-// GenerateSigma2 generates the Sigma2 Packet payload (Server side).
-func (c *CASEContext) GenerateSigma2() ([]byte, error) {
+// generateSigma2 generates the Sigma2 Packet payload (Server side).
+func (c *caseContext) generateSigma2() ([]byte, error) {
 	var err error
 	c.ResponderEphKey, err = ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
@@ -148,7 +126,7 @@ func (c *CASEContext) GenerateSigma2() ([]byte, error) {
 	s2k := hkdfSha256(c.SharedSecret, salt, []byte("Sigma2"), 16)
 
 	cert, _ := c.Fabric.Certificate(c.Fabric.NodeID())
-	tbe := CASESigma2Signed{
+	tbe := caseSigma2Signed{
 		ResponderNOC: c.Fabric.SerializeCertificateIntoMatter(cert),
 		Signature:    make([]byte, 64), // Dummy signature
 	}
@@ -158,7 +136,7 @@ func (c *CASEContext) GenerateSigma2() ([]byte, error) {
 	ccmMode, _ := ccm.NewCCM(block, 16, len(nonce))
 	encrypted2 := ccmMode.Seal(nil, nonce, tbe.Encode().Bytes(), nil)
 
-	msg := CASESigma2{
+	msg := caseSigma2{
 		ResponderRandom:    c.ResponderRandom,
 		ResponderSessionID: c.ResponderSessionID,
 		ResponderEphPubKey: c.ResponderEphKey.PublicKey().Bytes(),
@@ -170,9 +148,9 @@ func (c *CASEContext) GenerateSigma2() ([]byte, error) {
 	return payload, nil
 }
 
-// ParseSigma2 processes the incoming Sigma2 message from the responder and generates the Sigma3 payload.
-func (c *CASEContext) ParseSigma2(payload []byte) ([]byte, uint16, error) {
-	var msg CASESigma2
+// parseSigma2 processes the incoming Sigma2 message from the responder and generates the Sigma3 payload.
+func (c *caseContext) parseSigma2(payload []byte) ([]byte, uint16, error) {
+	var msg caseSigma2
 	if err := msg.Decode(payload); err != nil {
 		return nil, 0, err
 	}
@@ -214,12 +192,12 @@ func (c *CASEContext) ParseSigma2(payload []byte) ([]byte, uint16, error) {
 
 	c.TranscriptHash = append(c.TranscriptHash, payload...)
 
-	return c.GenerateSigma3()
+	return c.generateSigma3()
 }
 
-// ParseSigma3 processes the incoming Sigma3 message (Server side).
-func (c *CASEContext) ParseSigma3(payload []byte) ([]byte, error) {
-	var msg CASESigma3
+// parseSigma3 processes the incoming Sigma3 message (Server side).
+func (c *caseContext) parseSigma3(payload []byte) ([]byte, error) {
+	var msg caseSigma3
 	if err := msg.Decode(payload); err != nil {
 		return nil, err
 	}
@@ -244,7 +222,7 @@ func (c *CASEContext) ParseSigma3(payload []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (c *CASEContext) GenerateSigma3() ([]byte, uint16, error) {
+func (c *caseContext) generateSigma3() ([]byte, uint16, error) {
 	var initiatorNOC, initiatorICAC, signature []byte
 	if c.Fabric != nil {
 		cert, err := c.Fabric.Certificate(c.Fabric.NodeID())
@@ -253,7 +231,7 @@ func (c *CASEContext) GenerateSigma3() ([]byte, uint16, error) {
 		}
 		initiatorNOC = c.Fabric.SerializeCertificateIntoMatter(cert)
 
-		tbs := CASESigma3TBS{
+		tbs := caseSigma3TBS{
 			InitiatorNOC:       initiatorNOC,
 			InitiatorICAC:      initiatorICAC,
 			InitiatorEphPubKey: c.InitiatorEphKey.PublicKey().Bytes(),
@@ -264,11 +242,12 @@ func (c *CASEContext) GenerateSigma3() ([]byte, uint16, error) {
 		if err != nil {
 			return nil, 0, err
 		}
+		// TODO: wtf is that?
 		_ = tbs
 		_ = privKey
 	}
 
-	tbe := CASESigma3Signed{
+	tbe := caseSigma3Signed{
 		InitiatorNOC: initiatorNOC,
 		Signature:    signature,
 	}
@@ -291,7 +270,7 @@ func (c *CASEContext) GenerateSigma3() ([]byte, uint16, error) {
 	}
 	encrypted3 := ccmMode.Seal(nil, nonce, tbe.Encode().Bytes(), nil)
 
-	msg := CASESigma3{Encrypted: encrypted3}
+	msg := caseSigma3{Encrypted: encrypted3}
 	payload := msg.Encode().Bytes()
 
 	c.TranscriptHash = append(c.TranscriptHash, payload...)
@@ -299,8 +278,8 @@ func (c *CASEContext) GenerateSigma3() ([]byte, uint16, error) {
 	return payload, c.ResponderSessionID, nil
 }
 
-// SessionKeys derives the final application session keys after the handshake is complete.
-func (c *CASEContext) SessionKeys() (encryptionKey, decryptionKey []byte) {
+// sessionKeys derives the final application session keys after the handshake is complete.
+func (c *caseContext) sessionKeys() (encryptionKey, decryptionKey []byte) {
 	if c.Fabric == nil {
 		return nil, nil
 	}

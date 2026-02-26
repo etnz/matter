@@ -18,7 +18,11 @@ import (
 )
 
 // PASE is used exclusively during the commissioning phase to securely establish the first session.
+//
 // PASEContext manages the state of a Passcode-Authenticated Session Establishment handshake.
+// It is handled separately from CASE since it has a different flow and message structure, and is only used during commissioning.
+// There is one CASE context per session, while there may be multiple PASE contexts during commissioning (e.g. if the first attempt fails and the commissioner retries with a different passcode).
+// So the PASEContext is stored by ExchangeID.
 type PASEContext struct {
 	// user provided passcode from QR Code usually but any means also works.
 	Passcode uint32
@@ -83,7 +87,7 @@ func (c *PASEContext) GeneratePBKDFParamRequest() ([]byte, error) {
 		c.ExchangeID = id
 	}
 
-	req := PBKDFParamRequest{
+	req := pbkdfParamRequest{
 		InitiatorRandom:    c.InitiatorRandom,
 		InitiatorSessionID: c.InitiatorSessionID,
 		PasscodeID:         c.PasscodeID,
@@ -96,7 +100,7 @@ func (c *PASEContext) GeneratePBKDFParamRequest() ([]byte, error) {
 // ParsePBKDFParamResponseAndGeneratePake1 processes the server's PBKDF parameters and generates the Pake1 payload.
 func (c *PASEContext) ParsePBKDFParamResponseAndGeneratePake1(payload []byte) ([]byte, error) {
 	c.PBKDFParamResponse = payload
-	var resp PBKDFParamResponse
+	var resp pbkdfParamResponse
 	if err := resp.Decode(payload); err != nil {
 		return nil, err
 	}
@@ -146,14 +150,14 @@ func (c *PASEContext) ParsePBKDFParamResponseAndGeneratePake1(payload []byte) ([
 	pA := nistec.NewP256Point().Add(xG, w0M)
 	c.pA = pA.Bytes()
 
-	pake1Msg := Pake1{PA: c.pA}
+	pake1Msg := pake1{PA: c.pA}
 
 	return pake1Msg.Encode().Bytes(), nil
 }
 
 // ParsePake2AndGeneratePake3 processes the server's Pake2 message and generates the Pake3 payload.
 func (c *PASEContext) ParsePake2AndGeneratePake3(payload []byte) ([]byte, uint16, error) {
-	var msg Pake2
+	var msg pake2
 	if err := msg.Decode(payload); err != nil {
 		return nil, 0, err
 	}
@@ -211,7 +215,7 @@ func (c *PASEContext) ParsePake2AndGeneratePake3(payload []byte) ([]byte, uint16
 		return nil, 0, fmt.Errorf("invalid cB confirmation")
 	}
 
-	pake3Msg := Pake3{CA: cA}
+	pake3Msg := pake3{CA: cA}
 
 	return pake3Msg.Encode().Bytes(), c.ResponderSessionID, nil
 }
@@ -229,7 +233,7 @@ func (c *PASEContext) SessionKeys() (encryptionKey, decryptionKey, attestationCh
 }
 
 func (c *PASEContext) ParsePBKDFParamRequest(payload []byte) error {
-	var req PBKDFParamRequest
+	var req pbkdfParamRequest
 	if err := req.Decode(payload); err != nil {
 		return err
 	}
@@ -258,11 +262,11 @@ func (c *PASEContext) GeneratePBKDFParamResponse() ([]byte, error) {
 		return nil, err
 	}
 
-	resp := PBKDFParamResponse{
+	resp := pbkdfParamResponse{
 		InitiatorRandom:    c.InitiatorRandom,
 		ResponderRandom:    responderRandom,
 		ResponderSessionID: c.ResponderSessionID,
-		PBKDFParameters: &PBKDFParameters{
+		PBKDFParameters: &pbkdfParameters{
 			Iterations: iterations,
 			Salt:       salt,
 		},
@@ -274,7 +278,7 @@ func (c *PASEContext) GeneratePBKDFParamResponse() ([]byte, error) {
 }
 
 func (c *PASEContext) ParsePake1AndGeneratePake2(payload []byte) ([]byte, error) {
-	var msg Pake1
+	var msg pake1
 	if err := msg.Decode(payload); err != nil {
 		return nil, err
 	}
@@ -284,7 +288,7 @@ func (c *PASEContext) ParsePake1AndGeneratePake2(payload []byte) ([]byte, error)
 	}
 	c.pA = msg.PA
 
-	var resp PBKDFParamResponse
+	var resp pbkdfParamResponse
 	if err := resp.Decode(c.PBKDFParamResponse); err != nil {
 		return nil, err
 	}
@@ -368,13 +372,13 @@ func (c *PASEContext) ParsePake1AndGeneratePake2(payload []byte) ([]byte, error)
 	macB.Write(c.pA)
 	cB := macB.Sum(nil)
 
-	pake2Msg := Pake2{PB: c.pB, CB: cB}
+	pake2Msg := pake2{PB: c.pB, CB: cB}
 
 	return pake2Msg.Encode().Bytes(), nil
 }
 
 func (c *PASEContext) ParsePake3(payload []byte) ([]byte, error) {
-	var msg Pake3
+	var msg pake3
 	if err := msg.Decode(payload); err != nil {
 		return nil, err
 	}

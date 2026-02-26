@@ -128,13 +128,14 @@ func (c *Client) ConnectWithFabric(f *securechannel.Fabric) error {
 	}
 	// Bootstrapping Client Outbound (Initiating CASE)
 	c.logger.Debug("CASE sending Sigma1")
-	caseCtx := &securechannel.CASEContext{Fabric: c.fabric}
-	sigma1Payload, err := caseCtx.GenerateSigma1()
+
+	// Create a new session context for CASE, that will be completed in the flow. The session keys will be populated after handling Sigma2.
+	newSession, sigma1Payload, err := securechannel.NewClientSession(f)
 	if err != nil {
 		return err
 	}
 
-	sigma1 := NewRequest(nil, ProtocolIDSecureChannel, OpCodeCASESigma1, sigma1Payload)
+	sigma1 := NewRequest(newSession, ProtocolIDSecureChannel, OpCodeCASESigma1, sigma1Payload)
 	sigma1.addr = c.peerAddress
 
 	//  AssignMessageCounter
@@ -164,7 +165,7 @@ func (c *Client) ConnectWithFabric(f *securechannel.Fabric) error {
 	// Check if it is an unencrypted message (Session ID 0)
 	if rp.header.SessionID == 0 {
 		if rp.protocolHeader.Opcode == OpCodeCASESigma2 {
-			sigma3Payload, peerSessionID, err := caseCtx.ParseSigma2(rp.payload)
+			sigma3Payload, err := newSession.HandleSigma2(rp.payload)
 			if err != nil {
 				return err
 			}
@@ -176,16 +177,10 @@ func (c *Client) ConnectWithFabric(f *securechannel.Fabric) error {
 				Payload:    sigma3Payload,
 			})
 
-			// Handshake complete: Initialize the secure session immediately so we can decrypt SigmaFinished
-			encKey, decKey := caseCtx.SessionKeys()
-			c.session = &securechannel.SessionContext{
-				ID:            peerSessionID,
-				EncryptionKey: encKey,
-				DecryptionKey: decKey,
-			}
+			c.session = newSession
 
-			sigma3.header.SessionID = peerSessionID
-			if err := sigma3.AssignMessageCounter(c.session); err != nil {
+			sigma3.header.SessionID = newSession.ID
+			if err := sigma3.AssignMessageCounter(newSession); err != nil {
 				return err
 			}
 
