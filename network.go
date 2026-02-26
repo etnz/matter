@@ -5,7 +5,7 @@ import (
 	"net"
 )
 
-// network moves matter message around.
+// network moves matter messages around.
 type network struct {
 	logger *slog.Logger
 }

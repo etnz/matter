@@ -14,12 +14,6 @@ import (
 
 // TODO: use a standard ccm implementation after https://github.com/golang/go/issues/27484
 
-// messageReceptionState tracks received message counters for replay protection.
-type messageReceptionState struct {
-	MaxCounter uint32
-	Bitmap     uint64
-}
-
 // transportType is a placeholder for the transport type.
 type transportType int
 
@@ -139,14 +133,18 @@ func (p *packet) DecryptAndAuthenticate(decryptionKey []byte) error {
 // It validates the decrypted Message Counter against a sliding reception window.
 // If the counter is outside the valid window or has been seen before, the message is marked as a duplicate
 // and might only be used to trigger an acknowledgment (if the `R` flag is set) before being dropped.
-func (p *packet) ProcessMessageCounter(peerState *messageReceptionState) error {
+func (p *packet) ProcessMessageCounter() error {
 	if p.header.SessionID == 0 {
-		return nil
+		if p.session == nil {
+			p.session = &securechannel.SessionContext{}
+		}
 	}
+	peerState := &p.session.PeerState
+
 	counter := p.header.MessageCounter
 	if counter > peerState.MaxCounter {
 		shift := counter - peerState.MaxCounter
-		if shift >= 64 {
+		if shift >= 32 {
 			peerState.Bitmap = 0
 		} else {
 			peerState.Bitmap <<= shift
@@ -156,10 +154,10 @@ func (p *packet) ProcessMessageCounter(peerState *messageReceptionState) error {
 		return nil
 	}
 	offset := peerState.MaxCounter - counter
-	if offset >= 64 {
+	if offset >= 32 {
 		return fmt.Errorf("message counter too old")
 	}
-	mask := uint64(1) << offset
+	mask := uint32(1) << offset
 	if (peerState.Bitmap & mask) != 0 {
 		return fmt.Errorf("duplicate message counter")
 	}

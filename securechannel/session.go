@@ -6,6 +6,12 @@ import (
 	"fmt"
 )
 
+// MessageReceptionState tracks received message counters for replay protection.
+type MessageReceptionState struct {
+	MaxCounter uint32
+	Bitmap     uint32
+}
+
 // SessionContext holds the state for a secure session.
 type SessionContext struct {
 	ID             uint16
@@ -14,6 +20,7 @@ type SessionContext struct {
 	EncryptionKey  []byte
 	DecryptionKey  []byte
 	CaseCtx        *caseContext
+	PeerState      MessageReceptionState
 }
 
 // NewServerSessionFromSigma1 creates a new SessionContext for a responder, parses the Sigma1 payload,
