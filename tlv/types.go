@@ -82,4 +82,5 @@ type FloatArray []float32
 type DoubleArray []float64
 type StringArray []string
 type OctetStringArray [][]byte
+type OctetString []byte
 type StructArray []Struct
