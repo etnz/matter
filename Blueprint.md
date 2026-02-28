@@ -7,7 +7,7 @@ The messaging layer handles the construction and parsing of Matter packets, whic
 
 * **`Message`**: Represents a high-level application message containing a `ProtocolID` (e.g., Secure Channel, Interaction Model), an `OpCode`, and a binary payload.
 * **`packet`**: The internal structure used to move data through the stack. It encapsulates the unencrypted Message Header and the Protocol Header, which is encrypted during secure sessions.
-* **TLV (Tag-Length-Value)**: Matter uses a custom binary encoding format. This package provides a full implementation for encoding and decoding complex nested structures, arrays, and lists used throughout the protocol.
+* **TLV (Tag-Length-Value)**: Matter uses a custom binary encoding format. This package provides a full implementation for encoding and decoding complex nested structures, arrays, and lists used throughout the protocol. It enforces Canonical Encoding (tag sorting) to ensure deterministic output.
 
 ## Message Reliability Protocol (MRP)
 The MRP layer guarantees message delivery over unreliable transports (UDP).

@@ -3,12 +3,14 @@ package securechannel
 import (
 	"crypto/aes"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 
 	"github.com/tom-code/gomat/ccm"
 	"golang.org/x/crypto/hkdf"
@@ -125,9 +127,26 @@ func (c *caseContext) generateSigma2() ([]byte, error) {
 	s2k := hkdfSha256(c.SharedSecret, salt, []byte("Sigma2"), 16)
 
 	cert, _ := c.Fabric.Certificate(c.Fabric.NodeID())
+	noc := c.Fabric.SerializeCertificateIntoMatter(cert)
+
+	// Generate Signature
+	tbs := caseSigma2TBS{
+		ResponderNOC:       noc,
+		ResponderEphPubKey: c.ResponderEphKey.PublicKey().Bytes(),
+	}
+	privKey, err := c.Fabric.PrivateKey(c.Fabric.NodeID())
+	if err != nil {
+		return nil, err
+	}
+	signature, err := signTBS(privKey, tbs.Encode())
+	if err != nil {
+		return nil, err
+	}
+
+	// TBS 2 TBE transformation, stays inside the same binary, can get along with using a deterministic tlv lib.
 	tbe := caseSigma2Signed{
-		ResponderNOC: c.Fabric.SerializeCertificateIntoMatter(cert),
-		Signature:    make([]byte, 64), // Dummy signature
+		ResponderNOC: noc,
+		Signature:    signature,
 	}
 
 	nonce := []byte("NCASE_Sigma2N")
@@ -189,6 +208,30 @@ func (c *caseContext) parseSigma2(payload []byte) ([]byte, uint16, error) {
 		return nil, 0, fmt.Errorf("failed to decrypt Sigma2: %v", err)
 	}
 
+	// Verify Signature
+	tbe := caseSigma2Signed{}
+
+	// Correcting the decryption flow:
+	plaintext, err := ccmMode.Open(nil, nonce, msg.Encrypted, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to decrypt Sigma2: %v", err)
+	}
+	if err := tbe.Decode(plaintext); err != nil {
+		return nil, 0, fmt.Errorf("failed to decode Sigma2Signed: %v", err)
+	}
+
+	// TBE -> TBS CAVEAT this is not the way to go. It MUST use the TBE bits as they were encoded.
+	tbs := caseSigma2TBS{
+		ResponderNOC:       tbe.ResponderNOC,
+		ResponderICAC:      tbe.ResponderICAC,
+		ResponderEphPubKey: c.ResponderEphPubKey.Bytes(),
+		ResumptionID:       tbe.ResumptionID,
+	}
+
+	if err := verifySignature(tbe.ResponderNOC, tbs.Encode(), tbe.Signature); err != nil {
+		return nil, 0, fmt.Errorf("invalid Sigma2 signature: %v", err)
+	}
+
 	c.TranscriptHash = append(c.TranscriptHash, payload...)
 
 	return c.generateSigma3()
@@ -208,9 +251,26 @@ func (c *caseContext) parseSigma3(payload []byte) ([]byte, error) {
 	nonce := []byte("NCASE_Sigma3N")
 	block, _ := aes.NewCipher(s3k)
 	ccmMode, _ := ccm.NewCCM(block, 16, len(nonce))
-	if _, err := ccmMode.Open(nil, nonce, msg.Encrypted, nil); err != nil {
+	plaintext, err := ccmMode.Open(nil, nonce, msg.Encrypted, nil)
+	if err != nil {
 		return nil, err
 	}
+
+	var tbe caseSigma3Signed
+	if err := tbe.Decode(plaintext); err != nil {
+		return nil, err
+	}
+
+	tbs := caseSigma3TBS{
+		InitiatorNOC:       tbe.InitiatorNOC,
+		InitiatorICAC:      tbe.InitiatorICAC,
+		InitiatorEphPubKey: c.InitiatorEphPubKey.Bytes(),
+		ResponderEphPubKey: c.ResponderEphKey.PublicKey().Bytes(),
+	}
+	if err := verifySignature(tbe.InitiatorNOC, tbs.Encode().Bytes(), tbe.Signature); err != nil {
+		return nil, fmt.Errorf("invalid Sigma3 signature: %v", err)
+	}
+
 	c.TranscriptHash = append(c.TranscriptHash, payload...)
 
 	sr := StatusReport{
@@ -230,20 +290,21 @@ func (c *caseContext) generateSigma3() ([]byte, uint16, error) {
 		}
 		initiatorNOC = c.Fabric.SerializeCertificateIntoMatter(cert)
 
+		privKey, err := c.Fabric.PrivateKey(c.Fabric.NodeID())
+		if err != nil {
+			return nil, 0, err
+		}
+
 		tbs := caseSigma3TBS{
 			InitiatorNOC:       initiatorNOC,
 			InitiatorICAC:      initiatorICAC,
 			InitiatorEphPubKey: c.InitiatorEphKey.PublicKey().Bytes(),
 			ResponderEphPubKey: c.ResponderEphPubKey.Bytes(),
 		}
-
-		privKey, err := c.Fabric.PrivateKey(c.Fabric.NodeID())
+		signature, err = signTBS(privKey, tbs.Encode().Bytes())
 		if err != nil {
 			return nil, 0, err
 		}
-		// TODO: wtf is that?
-		_ = tbs
-		_ = privKey
 	}
 
 	tbe := caseSigma3Signed{
@@ -297,4 +358,46 @@ func hkdfSha256(secret, salt, info []byte, size int) []byte {
 		return nil
 	}
 	return key
+}
+
+func signTBS(privKey any, data []byte) ([]byte, error) {
+	ecdsaKey, ok := privKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("private key is not ECDSA")
+	}
+	hash := sha256.Sum256(data)
+	r, s, err := ecdsa.Sign(rand.Reader, ecdsaKey, hash[:])
+	if err != nil {
+		return nil, err
+	}
+	// Serialize (r, s) to 64 bytes (32 bytes each)
+	signature := make([]byte, 64)
+	rBytes := r.Bytes()
+	sBytes := s.Bytes()
+	copy(signature[32-len(rBytes):32], rBytes)
+	copy(signature[64-len(sBytes):64], sBytes)
+	return signature, nil
+}
+
+func verifySignature(noc []byte, data []byte, signature []byte) error {
+	if len(signature) != 64 {
+		return fmt.Errorf("invalid signature length")
+	}
+	cert, err := ParseCertificateFromMatter(noc)
+	if err != nil {
+		return fmt.Errorf("failed to parse NOC: %v", err)
+	}
+	pubKey, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("public key is not ECDSA")
+	}
+
+	r := new(big.Int).SetBytes(signature[:32])
+	s := new(big.Int).SetBytes(signature[32:])
+	hash := sha256.Sum256(data)
+
+	if !ecdsa.Verify(pubKey, hash[:], r, s) {
+		return fmt.Errorf("signature verification failed")
+	}
+	return nil
 }

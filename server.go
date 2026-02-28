@@ -168,6 +168,8 @@ func (s *Server) handle(msg packet, outbound chan<- packet) {
 			if err != nil {
 				s.network.logger.Warn("failed to handle Sigma3", "error", err)
 				response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+				s.sessions.Delete(msg.session.ID)
+				msg.session.ID = 0
 			} else {
 				response = &Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: payload}
 			}
@@ -418,11 +420,13 @@ func (s *Server) outboundFlow(ctx context.Context, req packet, resp Message, out
 		return
 	}
 
-	// Transition - EncryptAndAuthenticate
+	// EncryptAndAuthenticate
 	// The payload and protocol header are encrypted using AES-CCM with the session's Encryption Key.
-	if err := outPkt.EncryptAndAuthenticate(outPkt.session.EncryptionKey); err != nil {
-		s.network.logger.Error("failed to encrypt", "error", err)
-		return
+	if outPkt.session.Secured() {
+		if err := outPkt.EncryptAndAuthenticate(outPkt.session.EncryptionKey); err != nil {
+			s.network.logger.Error("failed to encrypt", "error", err)
+			return
+		}
 	}
 
 	// Register Reliable

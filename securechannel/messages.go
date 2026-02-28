@@ -410,6 +410,29 @@ func (m *caseSigma2Signed) Decode(data []byte) error {
 	return nil
 }
 
+// caseSigma2TBS (To-Be-Signed) is the data structure over which the responder
+// creates its signature for the CASESigma2 message.
+type caseSigma2TBS struct {
+	// ResponderNOC is the responder's Node Operational Certificate.
+	ResponderNOC []byte
+	// ResponderICAC is the responder's Intermediate CA Certificate (optional).
+	ResponderICAC []byte
+	// ResponderEphPubKey is the responder's ephemeral public key.
+	ResponderEphPubKey []byte
+	// ResumptionID is used for session resumption.
+	ResumptionID []byte
+}
+
+func (m *caseSigma2TBS) Encode() []byte {
+	s := tlv.Struct{
+		tlv.ContextTag(1): m.ResponderNOC,
+		tlv.ContextTag(2): m.ResponderICAC,
+		tlv.ContextTag(3): m.ResponderEphPubKey,
+		tlv.ContextTag(4): m.ResumptionID,
+	}
+	return tlv.Encode(s)
+}
+
 // caseSigma3 is the payload for the CASESigma3 message (OpCode 0x32).
 // It is the initiator's final message in the CASE handshake.
 type caseSigma3 struct {
@@ -497,11 +520,9 @@ type caseSigma3TBS struct {
 func (m *caseSigma3TBS) Encode() tlv.Struct {
 	s := tlv.Struct{
 		tlv.ContextTag(1): m.InitiatorNOC,
+		tlv.ContextTag(2): m.InitiatorICAC,
 		tlv.ContextTag(3): m.InitiatorEphPubKey,
 		tlv.ContextTag(4): m.ResponderEphPubKey,
-	}
-	if len(m.InitiatorICAC) > 0 {
-		s[tlv.ContextTag(2)] = m.InitiatorICAC
 	}
 	return s
 }

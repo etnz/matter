@@ -49,14 +49,11 @@ func (f *Fabric) PrivateKey(nodeID uint64) (*ecdsa.PrivateKey, error) {
 
 // SerializeCertificateIntoMatter converts an X.509 certificate to the Matter TLV format.
 func (f *Fabric) SerializeCertificateIntoMatter(cert *x509.Certificate) []byte {
-	// TODO: implement proper certificate serialization according to Matter specifications.
-	// Placeholder for certificate serialization logic.
-	// In a real implementation, this would convert the X.509 cert to Matter's TLV format.
-	// For now, we return the raw DER bytes as a placeholder, or a dummy value.
-	if cert == nil {
-		return []byte("dummy_cert")
+	data, err := CertificateToMatterTLV(cert)
+	if err != nil {
+		return nil
 	}
-	return cert.Raw
+	return data
 }
 
 // MemCertificateManager is an in-memory certificate manager that generates keys and certificates.

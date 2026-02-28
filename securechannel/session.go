@@ -23,6 +23,8 @@ type SessionContext struct {
 	PeerState      MessageReceptionState
 }
 
+func (s *SessionContext) Secured() bool { return len(s.EncryptionKey) > 0 && len(s.DecryptionKey) > 0 }
+
 // NewServerSessionFromSigma1 creates a new SessionContext for a responder, parses the Sigma1 payload,
 // sets the responder session ID, and generates the Sigma2 payload.
 func NewServerSessionFromSigma1(fabric *Fabric, sigma1Payload []byte) (*SessionContext, []byte, error) {

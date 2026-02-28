@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sort"
 )
 
 // Element Types
@@ -37,6 +38,7 @@ const (
 )
 
 // Encode serializes a TLV tree node into bytes.
+// It ensures deterministic encoding by sorting Structure fields by tag (Canonical Encoding).
 func Encode(v any) []byte {
 	var buf bytes.Buffer
 	if err := encodeValue(&buf, AnonymousTag, v); err != nil {
@@ -123,8 +125,18 @@ func encodeValue(w io.Writer, tag Tag, v any) error {
 		if err := WriteStruct(w, tag); err != nil {
 			return err
 		}
-		for t, e := range val {
-			if err := encodeValue(w, t, e); err != nil {
+		keys := make([]Tag, 0, len(val))
+		for t := range val {
+			keys = append(keys, t)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].Control != keys[j].Control {
+				return keys[i].Control < keys[j].Control
+			}
+			return bytes.Compare(keys[i].Value[:], keys[j].Value[:]) < 0
+		})
+		for _, t := range keys {
+			if err := encodeValue(w, t, val[t]); err != nil {
 				return err
 			}
 		}

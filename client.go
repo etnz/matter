@@ -208,6 +208,16 @@ func (c *Client) ConnectWithFabric(f *securechannel.Fabric) error {
 				return fmt.Errorf("unexpected message: %v", rpFinished.protocolHeader.Opcode)
 			}
 
+			var sr securechannel.StatusReport
+			if err := sr.Decode(rpFinished.payload); err != nil {
+				c.session = nil
+				return fmt.Errorf("failed to decode status report: %v", err)
+			}
+			if sr.GeneralCode != securechannel.GeneralCodeSuccess {
+				c.session = nil
+				return fmt.Errorf("session establishment has failed: %v", sr.GeneralCode)
+			}
+
 			return nil
 		} else {
 			return fmt.Errorf("unexpected message during bootstrapping: %v", rp.protocolHeader.Opcode.String(rp.protocolHeader.ProtocolId))

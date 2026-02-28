@@ -25,7 +25,7 @@ The system is designed as a layered protocol stack in Go.
 An Intent captures a desired evolution.
 
 ### Active Intents
-* **[Compliance](./intents/compliance.md)**: Missing core protocol features (Crypto, IM).
+* **[Compliance](./intents/compliance.md)**: Missing core protocol features (Privacy, IM).
 * **[Experience](./intents/experience.md)**: Developer UX (mDNS, NVS, Callbacks).
 * **[Maintenance](./intents/maintenance.md)**: Technical debt, tooling, and verification tasks.
 
