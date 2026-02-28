@@ -18,13 +18,14 @@ The system is designed as a layered protocol stack in Go.
 * **Core Messaging**: Handles packet framing and TLV encoding.
 * **Secure Channel**: Manages encryption and session establishment (PASE/CASE).
 * **Interaction Model**: Implements the high-level language of Matter (Read/Write/Invoke).
+* **MRP**: Ensures reliable message delivery over UDP with retransmissions and acknowledgements.
 * **[The Blueprint](./Blueprint.md)**: The spatial source of truth and detailed architectural map.
 
 ## 🎯 The Intents
 An Intent captures a desired evolution.
 
 ### Active Intents
-* **[Compliance](./intents/compliance.md)**: Missing core protocol features (Crypto, MRP, IM).
+* **[Compliance](./intents/compliance.md)**: Missing core protocol features (Crypto, IM).
 * **[Experience](./intents/experience.md)**: Developer UX (mDNS, NVS, Callbacks).
 * **[Maintenance](./intents/maintenance.md)**: Technical debt, tooling, and verification tasks.
 
@@ -34,4 +35,3 @@ An Intent captures a desired evolution.
 
 ## 📅 Release Plan
 * **Current Focus**: Achieving core protocol compliance and passing `chip-tool` validation.
-

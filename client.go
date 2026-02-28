@@ -34,6 +34,7 @@ type Client struct {
 	session  *securechannel.SessionContext
 
 	exchanges sync.Map
+	mrp       *mrpEngine
 }
 
 var clientNetworkLevel = slog.LevelDebug
@@ -78,6 +79,7 @@ func (c *Client) init() {
 		}
 		// open up the  chan based network connection.
 		c.conn = c.network.new(c.transport)
+		c.mrp = newMRPEngine(c.conn.outbound, c.network.logger)
 		go c.inboundFlow()
 	})
 }
@@ -335,6 +337,11 @@ func (c *Client) outboundFlow(msg Message) (*packet, error) {
 	// If the message is being dispatched over an unreliable transport like UDP, the Reliability (`R`) flag is set.
 	req.protocolHeader.ExchangeFlags |= FlagReliable
 
+	// Piggyback ACK
+	if ackCounter, ok := c.mrp.piggybackAck(req.protocolHeader.ExchangeID); ok {
+		req.PiggybackAck(ackCounter)
+	}
+
 	// Transition - AssignMessageCounter
 	// The stack retrieves the session's active Local Message Counter and increments it by 1.
 	if err := req.AssignMessageCounter(c.session); err != nil {
@@ -348,10 +355,11 @@ func (c *Client) outboundFlow(msg Message) (*packet, error) {
 		return nil, err
 	}
 
+	// Register for retransmission
+	c.mrp.registerReliableMessage(*req)
+
 	// Send the packet to the network
-	if _, err := req.WriteTo(c.transport); err != nil {
-		return nil, err
-	}
+	c.conn.outbound <- *req
 	return req, nil
 }
 
@@ -362,6 +370,25 @@ func (c *Client) inboundFlow() {
 		// Transition - DecodeMessageHeader
 		if err := rp.DecodeMessageHeader(rp.payload); err != nil {
 			c.logger.Warn("failed to decode message header", "error", err)
+			continue
+		}
+
+		if rp.header.SessionID != 0 {
+			if c.session != nil && c.session.ID == rp.header.SessionID {
+				rp.session = c.session
+			} else {
+				c.logger.Debug("dropping message with unknown session ID", "sessionID", rp.header.SessionID)
+				continue
+			}
+		}
+
+		// Handle Duplicates
+		if err := rp.ProcessMessageCounter(); err != nil {
+			if err == ErrDuplicateMessage && (rp.protocolHeader.ExchangeFlags&FlagReliable) != 0 {
+				// Send Standalone ACK immediately
+				c.mrp.sendStandaloneAck(&rp)
+			}
+			c.logger.Warn("dropping duplicate or invalid message", "error", err)
 			continue
 		}
 
@@ -384,6 +411,14 @@ func (c *Client) inboundFlow() {
 				c.logger.Warn("failed to decode protocol header", "error", err)
 				continue
 			}
+		}
+
+		// MRP Hooks
+		if (rp.protocolHeader.ExchangeFlags & FlagAck) != 0 {
+			c.mrp.acknowledgeMessage(rp.protocolHeader.AckCounter)
+		}
+		if (rp.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
+			c.mrp.scheduleAck(&rp)
 		}
 
 		if val, ok := c.exchanges.Load(rp.protocolHeader.ExchangeID); ok {

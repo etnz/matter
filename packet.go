@@ -12,6 +12,8 @@ import (
 	"github.com/tom-code/gomat/ccm"
 )
 
+var ErrDuplicateMessage = fmt.Errorf("duplicate message counter")
+
 // TODO: use a standard ccm implementation after https://github.com/golang/go/issues/27484
 
 // transportType is a placeholder for the transport type.
@@ -139,6 +141,9 @@ func (p *packet) ProcessMessageCounter() error {
 			p.session = &securechannel.SessionContext{}
 		}
 	}
+	if p.session == nil {
+		return fmt.Errorf("session context missing for secure message")
+	}
 	peerState := &p.session.PeerState
 
 	counter := p.header.MessageCounter
@@ -159,7 +164,7 @@ func (p *packet) ProcessMessageCounter() error {
 	}
 	mask := uint32(1) << offset
 	if (peerState.Bitmap & mask) != 0 {
-		return fmt.Errorf("duplicate message counter")
+		return ErrDuplicateMessage
 	}
 	peerState.Bitmap |= mask
 	return nil

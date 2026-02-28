@@ -72,6 +72,7 @@ type Server struct {
 	// pase are stored per exchange ID and not session ID because the session is not established until the handshake completes,
 	// but we need to keep track of the PASE context during the handshake which may involve multiple messages (PBKDFParamRequest/Response, PASEPake1/2/3).
 	paseSessions sync.Map
+	mrp          *mrpEngine
 }
 
 // ListenAndServe listens on the UDP network address s.Addr and then calls Serve.
@@ -103,6 +104,8 @@ func (s *Server) Serve(pc net.PacketConn) (err error) {
 
 	conn := s.network.new(pc)
 	defer conn.close()
+	s.mrp = newMRPEngine(conn.outbound, s.network.logger)
+	defer s.mrp.stop()
 
 	for msg := range conn.inbound {
 		// Build a Response to this Request, using the Handler.
@@ -386,8 +389,9 @@ func (s *Server) outboundFlow(ctx context.Context, req packet, resp Message, out
 	// Finding the pending acknowledgement for the client's request, it sets the `A` (Acknowledgement) flag to 1
 	// and injects the client's `Acknowledged Message Counter` into the outbound Protocol Header.
 	if (req.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
-		// TODO: check the Acknowledgement Table for pending acknowledgements and piggyback if found.
-		outPkt.PiggybackAck(req.header.MessageCounter)
+		if ackCounter, ok := s.mrp.piggybackAck(req.protocolHeader.ExchangeID); ok {
+			outPkt.PiggybackAck(ackCounter)
+		}
 	}
 
 	// AssignMessageCounter
@@ -402,6 +406,11 @@ func (s *Server) outboundFlow(ctx context.Context, req packet, resp Message, out
 	if err := outPkt.EncryptAndAuthenticate(outPkt.session.EncryptionKey); err != nil {
 		s.network.logger.Error("failed to encrypt", "error", err)
 		return
+	}
+
+	// Register Reliable
+	if (outPkt.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
+		s.mrp.registerReliableMessage(outPkt)
 	}
 
 	// Send the response back to the network layer
@@ -426,6 +435,14 @@ func (s *Server) inboundFlow(ctx context.Context, req *packet) error {
 	if req.header.SessionID == 0 {
 		// The server checks the unencrypted message counter against its Unsecured Session Context.
 		if err := req.ProcessMessageCounter(); err != nil {
+			if err == ErrDuplicateMessage {
+				// Try to decode protocol header to see if we need to ACK
+				if errDecode := req.DecodeProtocolHeader(); errDecode == nil {
+					if (req.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
+						s.mrp.sendStandaloneAck(req)
+					}
+				}
+			}
 			s.network.logger.Warn("replay detected or invalid counter", "error", err)
 			return err
 		}
@@ -436,6 +453,14 @@ func (s *Server) inboundFlow(ctx context.Context, req *packet) error {
 		if err := req.DecodeProtocolHeader(); err != nil {
 			s.network.logger.Warn("failed to decode protocol header", "error", err)
 			return err
+		}
+
+		// MRP Hooks
+		if (req.protocolHeader.ExchangeFlags & FlagAck) != 0 {
+			s.mrp.acknowledgeMessage(req.protocolHeader.AckCounter)
+		}
+		if (req.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
+			s.mrp.scheduleAck(req)
 		}
 		return nil
 	}
@@ -464,8 +489,20 @@ func (s *Server) inboundFlow(ctx context.Context, req *packet) error {
 	// ProcessMessageCounter
 	// The decrypted Message Counter is validated against the sender's `MessageReceptionState` sliding window.
 	if err := req.ProcessMessageCounter(); err != nil {
+		if err == ErrDuplicateMessage && (req.protocolHeader.ExchangeFlags&FlagReliable) != 0 {
+			s.mrp.sendStandaloneAck(req)
+		}
 		s.network.logger.Warn("replay detected or invalid counter", "error", err)
 		return err
 	}
+
+	// Handle ACKs and Schedule ACK
+	if (req.protocolHeader.ExchangeFlags & FlagAck) != 0 {
+		s.mrp.acknowledgeMessage(req.protocolHeader.AckCounter)
+	}
+	if (req.protocolHeader.ExchangeFlags & FlagReliable) != 0 {
+		s.mrp.scheduleAck(req)
+	}
+
 	return nil
 }

@@ -9,6 +9,12 @@ The messaging layer handles the construction and parsing of Matter packets, whic
 * **`packet`**: The internal structure used to move data through the stack. It encapsulates the unencrypted Message Header and the Protocol Header, which is encrypted during secure sessions.
 * **TLV (Tag-Length-Value)**: Matter uses a custom binary encoding format. This package provides a full implementation for encoding and decoding complex nested structures, arrays, and lists used throughout the protocol.
 
+## Message Reliability Protocol (MRP)
+The MRP layer guarantees message delivery over unreliable transports (UDP).
+* **Engine**: The `mrpEngine` runs asynchronously, managing `RetransmissionTable` and `AckTable`.
+* **Reliability**: Implements exponential backoff for retransmissions.
+* **Acknowledgements**: Supports both Piggybacked ACKs (embedded in response) and Standalone ACKs (generated if no response is ready).
+
 ## Secure Channel and Session Management
 Security is central to Matter, establishing encrypted sessions between nodes.
 
