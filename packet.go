@@ -3,6 +3,7 @@ package matter
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -97,6 +98,37 @@ func (p *packet) DecodeMessageHeader(datagram []byte) error {
 // to deobfuscate the Message Counter and Node IDs *before* the message can be authenticated.
 // This is done if the Privacy (`P`) flag is set in the incoming message's Security Flags.
 func (p *packet) RemovePrivacyObfuscation(privacyKey []byte) error {
+	if (p.header.SecurityFlags & FlagPrivacy) == 0 {
+		return nil
+	}
+
+	// The MIC is the last 16 bytes of the encrypted payload
+	if len(p.payload) < 16 {
+		return fmt.Errorf("payload too short for MIC")
+	}
+	mic := p.payload[len(p.payload)-16:]
+
+	block, err := aes.NewCipher(privacyKey)
+	if err != nil {
+		return err
+	}
+	stream := cipher.NewCTR(block, mic)
+
+	// Construct the buffer of data to de-obfuscate
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, p.header.MessageCounter)
+	if len(p.header.SourceNodeID) > 0 {
+		buf.Write(p.header.SourceNodeID)
+	}
+	data := buf.Bytes()
+
+	stream.XORKeyStream(data, data)
+
+	r := bytes.NewReader(data)
+	binary.Read(r, binary.LittleEndian, &p.header.MessageCounter)
+	if len(p.header.SourceNodeID) > 0 {
+		r.Read(p.header.SourceNodeID)
+	}
 	return nil
 }
 
@@ -308,6 +340,37 @@ func (p *packet) EncryptAndAuthenticate(encryptionKey []byte) error {
 // if the message requires metadata protection (the `P` flag is set).
 // It uses the AES-CCM MIC generated in the previous step as the AES-CTR nonce.
 func (p *packet) ApplyPrivacyObfuscation(privacyKey []byte) error {
+	if (p.header.SecurityFlags & FlagPrivacy) == 0 {
+		return nil
+	}
+
+	// The MIC is the last 16 bytes of the encrypted payload
+	if len(p.payload) < 16 {
+		return fmt.Errorf("payload too short for MIC")
+	}
+	mic := p.payload[len(p.payload)-16:]
+
+	block, err := aes.NewCipher(privacyKey)
+	if err != nil {
+		return err
+	}
+	stream := cipher.NewCTR(block, mic)
+
+	// Construct the buffer of data to obfuscate
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, p.header.MessageCounter)
+	if len(p.header.SourceNodeID) > 0 {
+		buf.Write(p.header.SourceNodeID)
+	}
+	data := buf.Bytes()
+
+	stream.XORKeyStream(data, data)
+
+	r := bytes.NewReader(data)
+	binary.Read(r, binary.LittleEndian, &p.header.MessageCounter)
+	if len(p.header.SourceNodeID) > 0 {
+		r.Read(p.header.SourceNodeID)
+	}
 	return nil
 }
 

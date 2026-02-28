@@ -6,7 +6,7 @@ This document describes the core architecture of the `github.com/etnz/matter` re
 The messaging layer handles the construction and parsing of Matter packets, which consist of multiple nested headers and a payload.
 
 * **`Message`**: Represents a high-level application message containing a `ProtocolID` (e.g., Secure Channel, Interaction Model), an `OpCode`, and a binary payload.
-* **`packet`**: The internal structure used to move data through the stack. It encapsulates the unencrypted Message Header and the Protocol Header, which is encrypted during secure sessions.
+* **`packet`**: The internal structure used to move data through the stack. It encapsulates the Message Header (which supports Privacy Obfuscation) and the Protocol Header (encrypted during secure sessions).
 * **TLV (Tag-Length-Value)**: Matter uses a custom binary encoding format. This package provides a full implementation for encoding and decoding complex nested structures, arrays, and lists used throughout the protocol. It enforces Canonical Encoding (tag sorting) to ensure deterministic output.
 
 ## Message Reliability Protocol (MRP)

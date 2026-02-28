@@ -184,6 +184,7 @@ const (
 	FlagInitiator = 0x01
 	FlagAck       = 0x02
 	FlagReliable  = 0x10
+	FlagPrivacy   = 0x80
 )
 
 type messageHeader struct {
