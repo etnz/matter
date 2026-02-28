@@ -14,5 +14,5 @@ This document outlines elements that are strictly the responsibility of the appl
 * *Note on Convenience Implementations:* The project **may** provide reference/helper packages specifically for Linux (e.g., a Linux BLE advertiser, a Linux Wi-Fi provisioner, or a Thread border router integration) to help users get started quickly.
 
 ## NVS Engine Implementation
-* **Database Engine**: The core package will not bundle a heavy database (like SQLite). The user is expected to implement the storage interface provided in Bucket 1.
+* **Database Engine**: The core package will not bundle a heavy database (like SQLite). The user is expected to implement a storage interface.
 * *Note on Convenience Implementations:* The project **may** provide a very basic, simple file-based JSON/KV implementation out-of-the-box for rapid prototyping and testing.

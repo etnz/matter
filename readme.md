@@ -34,6 +34,4 @@ An Intent captures a desired evolution.
 
 ## 📅 Release Plan
 * **Current Focus**: Achieving core protocol compliance and passing `chip-tool` validation.
-```
 
-```
