@@ -233,8 +233,18 @@ func (m *packet) NewResponse(msg Message) packet {
 
 // NewStatusReport transforms the request into a Status Report message if a server encounters an error
 // (e.g., cannot process the action, unsupported endpoint, etc.).
-func (p *packet) NewStatusReport(statusCode uint8, protocolID ProtocolID) packet {
-	return packet{}
+func (p *packet) NewStatusReport(generalStatus uint16, protocolID ProtocolID, protocolCode uint16, protocolData []byte) packet {
+	sr := securechannel.StatusReport{
+		GeneralCode:  securechannel.GeneralCode(generalStatus),
+		ProtocolID:   uint32(protocolID),
+		ProtocolCode: securechannel.ProtocolCode(protocolCode),
+		ProtocolData: protocolData,
+	}
+	return p.NewResponse(Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodeStatusReport,
+		Payload:    sr.Encode(),
+	})
 }
 
 // NewChunkedResponse breaks a generated response (like a large `ReportData` payload) into a series of smaller messages if it exceeds the IPv6 MTU limits.

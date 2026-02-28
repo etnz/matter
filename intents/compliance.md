@@ -9,7 +9,6 @@ This document outlines the features and fixes required within the core Matter pa
 
 ## Interaction Model (IM) Deficiencies
 * **Message Chunking**: Implement `NewChunkedResponse` in `packet.go` to support breaking down large payloads (like extensive `ReportData` lists) that exceed the IPv6 Maximum Transmission Unit (MTU).
-* **Status Reporting**: Fix the `NewStatusReport` stub to correctly construct the `StatusReport` payload, assign the accurate Exchange ID, flip the Initiator flag, and set the protocol opcode to `OpCodeStatusReport`.
 * **Subscription Engine**: Build a background engine to support `SubscribeRequest`. This engine must manage timers (`MinIntervalFloor`, `MaxIntervalCeiling`) and actively push `ReportDataMessage` updates to the client when attribute values change.
 * **Message Routing Engine**: Implement an internal dispatcher in the `Server` that routes incoming `AttributePathIB` requests (Reads/Writes/Invokes) to the correct user-defined Endpoints and Clusters.
 
@@ -19,3 +18,4 @@ This document outlines the features and fixes required within the core Matter pa
 
 ## Addendums
 * **MRP Implementation**: Implemented the `mrpEngine` to handle reliable messaging over UDP. This includes the `RetransmissionTable`, `AckTable`, exponential backoff logic, and support for both Piggybacked and Standalone Acknowledgements.
+* **Status Reporting**: Implemented the `StatusReport` structure in `securechannel` and updated `packet.go`, `server.go`, and `client.go` to correctly generate and handle status reports for success, failure, and session termination.

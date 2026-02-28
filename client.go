@@ -169,6 +169,13 @@ func (c *Client) ConnectWithFabric(f *securechannel.Fabric) error {
 		if rp.protocolHeader.Opcode == OpCodeCASESigma2 {
 			sigma3Payload, err := newSession.HandleSigma2(rp.payload)
 			if err != nil {
+				c.logger.Error("failed to handle Sigma2", "err", err)
+				report := rp.NewStatusReport(uint16(securechannel.GeneralCodeFailure), ProtocolIDSecureChannel, uint16(securechannel.CodeInvalidParameter), nil)
+				unsecuredSession := &securechannel.SessionContext{ID: 0}
+				report.AssignMessageCounter(unsecuredSession)
+				report.protocolHeader.ExchangeFlags |= FlagReliable
+				c.mrp.registerReliableMessage(report)
+				c.conn.outbound <- report
 				return err
 			}
 			// Transformation (NewSigma3)
@@ -285,6 +292,13 @@ func (c *Client) ConnectWithPasscode(passcode uint32) error {
 	// Generate Pake3
 	pake3Payload, peerSessionID, err := paseCtx.ParsePake2AndGeneratePake3(resp.payload)
 	if err != nil {
+		c.logger.Error("failed to handle Pake2", "err", err)
+		report := resp.NewStatusReport(uint16(securechannel.GeneralCodeFailure), ProtocolIDSecureChannel, uint16(securechannel.CodeInvalidParameter), nil)
+		unsecuredSession := &securechannel.SessionContext{ID: 0}
+		report.AssignMessageCounter(unsecuredSession)
+		report.protocolHeader.ExchangeFlags |= FlagReliable
+		c.mrp.registerReliableMessage(report)
+		c.conn.outbound <- report
 		return err
 	}
 	pake3 := resp.NewResponse(Message{
@@ -548,4 +562,22 @@ func (c *Client) TimedRequest(req TimedRequestMessage) (StatusResponseMessage, e
 	return out, nil
 }
 
-// TODO: we don't have the MRP flow implemented yet (regression).
+// Close terminates the session with the peer node.
+func (c *Client) Close() error {
+	if c.session != nil {
+		sr := securechannel.StatusReport{
+			GeneralCode:  securechannel.GeneralCodeSuccess,
+			ProtocolID:   uint32(ProtocolIDSecureChannel),
+			ProtocolCode: securechannel.CodeCloseSession,
+		}
+		msg := Message{
+			ProtocolID: ProtocolIDSecureChannel,
+			OpCode:     OpCodeStatusReport,
+			Payload:    sr.Encode(),
+		}
+		_, err := c.outboundFlow(msg)
+		c.session = nil
+		return err
+	}
+	return nil
+}

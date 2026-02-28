@@ -1,7 +1,6 @@
 package securechannel
 
 import (
-	"bytes"
 	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
@@ -387,11 +386,12 @@ func (c *PASEContext) ParsePake3(payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid cA confirmation")
 	}
 
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint16(0)) // GeneralCode Success
-	binary.Write(&buf, binary.LittleEndian, uint32(0)) // ProtocolId
-	binary.Write(&buf, binary.LittleEndian, uint16(0)) // ProtocolCode
-	return buf.Bytes(), nil
+	sr := StatusReport{
+		GeneralCode:  GeneralCodeSuccess,
+		ProtocolID:   ProtocolIDSecureChannel,
+		ProtocolCode: CodeSessionEstablishmentSuccess,
+	}
+	return sr.Encode(), nil
 }
 
 func appendLengthAndValue(buf []byte, val []byte) []byte {

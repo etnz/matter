@@ -145,31 +145,33 @@ func (s *Server) handle(msg packet, outbound chan<- packet) {
 		session, payload, err := securechannel.NewServerSessionFromSigma1(s.Fabric, msg.payload)
 		if err != nil {
 			s.network.logger.Warn("failed to handle Sigma1", "error", err)
-			return
-		}
-		// create a new incomplete session to handle future exchanges.
-		s.sessions.Store(session.ID, session)
+			response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+		} else {
+			// create a new incomplete session to handle future exchanges.
+			s.sessions.Store(session.ID, session)
 
-		response = &Message{
-			ProtocolID: ProtocolIDSecureChannel,
-			OpCode:     OpCodeCASESigma2,
-			Payload:    payload,
+			response = &Message{
+				ProtocolID: ProtocolIDSecureChannel,
+				OpCode:     OpCodeCASESigma2,
+				Payload:    payload,
+			}
 		}
 
 	case isSecureChannel && opCode == OpCodeCASESigma3:
 		if msg.session == nil {
 			s.network.logger.Warn("failed to handle Sigma3", "error", fmt.Errorf("sigma3 received without session context"))
-			return
-		}
-		s.logger.Debug("handling Sigma3", "sessionID", msg.session.ID)
+			response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+		} else {
+			s.logger.Debug("handling Sigma3", "sessionID", msg.session.ID)
 
-		payload, err := msg.session.HandleSigma3(msg.payload)
-		if err != nil {
-			s.network.logger.Warn("failed to handle Sigma3", "error", err)
-			return
+			payload, err := msg.session.HandleSigma3(msg.payload)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Sigma3", "error", err)
+				response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+			} else {
+				response = &Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: payload}
+			}
 		}
-
-		response = &Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: payload}
 
 	case isSecureChannel && opCode == OpCodePBKDFParamRequest:
 		//
@@ -180,62 +182,64 @@ func (s *Server) handle(msg packet, outbound chan<- packet) {
 		paseCtx, payload, err := securechannel.NewPASEContextFromPBKDFParamRequest(passcode, msg.payload)
 		if err != nil {
 			s.network.logger.Warn("failed to handle PBKDFParamRequest", "error", err)
-			return
-		}
+			response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+		} else {
+			//
+			s.paseSessions.Store(msg.protocolHeader.ExchangeID, paseCtx)
 
-		//
-		s.paseSessions.Store(msg.protocolHeader.ExchangeID, paseCtx)
-
-		response = &Message{
-			ProtocolID: ProtocolIDSecureChannel,
-			OpCode:     OpCodePBKDFParamResponse,
-			Payload:    payload,
+			response = &Message{
+				ProtocolID: ProtocolIDSecureChannel,
+				OpCode:     OpCodePBKDFParamResponse,
+				Payload:    payload,
+			}
 		}
 
 	case isSecureChannel && opCode == OpCodePASEPake1:
 		val, ok := s.paseSessions.Load(msg.protocolHeader.ExchangeID)
 		if !ok {
 			s.network.logger.Warn("failed to handle Pake1", "error", fmt.Errorf("PASE context not found"))
-			return
-		}
-		paseCtx := val.(*securechannel.PASEContext)
+			response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+		} else {
+			paseCtx := val.(*securechannel.PASEContext)
 
-		payload, err := paseCtx.ParsePake1AndGeneratePake2(msg.payload)
-		if err != nil {
-			s.network.logger.Warn("failed to handle Pake1", "error", err)
-			return
-		}
-
-		response = &Message{
-			ProtocolID: ProtocolIDSecureChannel,
-			OpCode:     OpCodePASEPake2,
-			Payload:    payload,
+			payload, err := paseCtx.ParsePake1AndGeneratePake2(msg.payload)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Pake1", "error", err)
+				response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+			} else {
+				response = &Message{
+					ProtocolID: ProtocolIDSecureChannel,
+					OpCode:     OpCodePASEPake2,
+					Payload:    payload,
+				}
+			}
 		}
 
 	case isSecureChannel && opCode == OpCodePASEPake3:
 		val, ok := s.paseSessions.Load(msg.protocolHeader.ExchangeID)
 		if !ok {
 			s.network.logger.Warn("failed to handle Pake3", "error", fmt.Errorf("PASE context not found"))
-			return
-		}
-		paseCtx := val.(*securechannel.PASEContext)
+			response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+		} else {
+			paseCtx := val.(*securechannel.PASEContext)
 
-		payload, err := paseCtx.ParsePake3(msg.payload)
-		if err != nil {
-			s.network.logger.Warn("failed to handle Pake3", "error", err)
-			return
+			payload, err := paseCtx.ParsePake3(msg.payload)
+			if err != nil {
+				s.network.logger.Warn("failed to handle Pake3", "error", err)
+				response = s.newStatusReport(securechannel.GeneralCodeFailure, securechannel.CodeInvalidParameter)
+			} else {
+				// Side effect is to retrieve keys, create a session and delete the pase context.
+				enc, dec, _ := paseCtx.SessionKeys()
+				session := &securechannel.SessionContext{
+					ID:            paseCtx.ResponderSessionID,
+					DecryptionKey: enc,
+					EncryptionKey: dec,
+				}
+				s.sessions.Store(session.ID, session)
+				s.paseSessions.Delete(msg.protocolHeader.ExchangeID)
+				response = &Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: payload}
+			}
 		}
-
-		// Side effect is to retrieve keys, create a session and delete the pase context.
-		enc, dec, _ := paseCtx.SessionKeys()
-		session := &securechannel.SessionContext{
-			ID:            paseCtx.ResponderSessionID,
-			DecryptionKey: enc,
-			EncryptionKey: dec,
-		}
-		s.sessions.Store(session.ID, session)
-		s.paseSessions.Delete(msg.protocolHeader.ExchangeID)
-		response = &Message{ProtocolID: ProtocolIDSecureChannel, OpCode: OpCodeStatusReport, Payload: payload}
 
 	case isInteractionModel && opCode == OpCodeReadRequest && s.ReadHandler != nil:
 		var req ReadRequestMessage
@@ -351,6 +355,19 @@ func (s *Server) handle(msg packet, outbound chan<- packet) {
 	if response != nil {
 		// response now contains that response, run the outbound flow to serialize and send the response back to the client.
 		s.outboundFlow(ctx, msg, *response, outbound)
+	}
+}
+
+func (s *Server) newStatusReport(generalCode securechannel.GeneralCode, protocolCode securechannel.ProtocolCode) *Message {
+	sr := securechannel.StatusReport{
+		GeneralCode:  generalCode,
+		ProtocolID:   uint32(ProtocolIDSecureChannel),
+		ProtocolCode: protocolCode,
+	}
+	return &Message{
+		ProtocolID: ProtocolIDSecureChannel,
+		OpCode:     OpCodeStatusReport,
+		Payload:    sr.Encode(),
 	}
 }
 

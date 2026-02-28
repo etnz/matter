@@ -1,7 +1,6 @@
 package securechannel
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/ecdh"
 	"crypto/hmac"
@@ -214,12 +213,12 @@ func (c *caseContext) parseSigma3(payload []byte) ([]byte, error) {
 	}
 	c.TranscriptHash = append(c.TranscriptHash, payload...)
 
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint16(0)) // GeneralCode Success
-	binary.Write(&buf, binary.LittleEndian, uint32(0)) // ProtocolId
-	binary.Write(&buf, binary.LittleEndian, uint16(0)) // ProtocolCode
-
-	return buf.Bytes(), nil
+	sr := StatusReport{
+		GeneralCode:  GeneralCodeSuccess,
+		ProtocolID:   ProtocolIDSecureChannel,
+		ProtocolCode: CodeSessionEstablishmentSuccess,
+	}
+	return sr.Encode(), nil
 }
 
 func (c *caseContext) generateSigma3() ([]byte, uint16, error) {

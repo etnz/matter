@@ -23,6 +23,7 @@ Security is central to Matter, establishing encrypted sessions between nodes.
     * **CASE**: Certificate-Authenticated Session Establishment. It is used for operational communication between commissioned nodes using X.509 certificates.
 * **`Fabric`**: Represents a logical grouping of nodes that share a trusted root. It manages certificates and the Intermediate Public Key (IPK).
 * **`SessionContext`**: Maintains the state for an active encrypted session, including session IDs, message counters for replay protection, and AES-CCM encryption/decryption keys.
+* **Status Reporting**: Implements the standardized Status Report message format used for session errors, termination, and acknowledgments.
 
 ## Communication Roles
 The repository provides two primary entry points for interacting with the protocol.
