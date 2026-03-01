@@ -5,11 +5,15 @@ This document covers features the package **must provide** to offer a high-quali
 ## Zero-Configuration Discovery (mDNS / DNS-SD)
 * **Full Broadcasting Implementation**: The package must provide the complete implementation for broadcasting Matter mDNS records (likely wrapping a 3rd party Go mDNS library). It must automatically publish and manage the `_matterc._udp` (Commissioning) and `_matter._tcp` (Operational) records without requiring the user to build this from scratch.
 
-## Persistence / NVS Enablement
-* **Standardized Storage Interfaces**: While the package won't enforce a specific database, it must provide robust, well-defined Go interfaces (e.g., `SaveFabric`, `LoadFabric`, `SaveGroupKeys`, `SaveACLs`) so a user can effortlessly plug in their own Non-Volatile Storage (NVS) backend.
+## Data Model Interfaces
+* **Cluster Interfaces**: The generated data model code must define clear Go interfaces for each cluster (e.g., `OperationalCredentialsServer`, `GroupKeyManagementServer`). This allows users to inject their own business logic or persistence layer by simply implementing the interface.
 
-## Network Provisioning Hooks
-* **Standardized Callbacks**: Provide clean callback interfaces (e.g., `OnJoinWiFi(ssid, password)`, `OnJoinThread(dataset)`) triggered by the Network Commissioning Cluster. This creates a clear bridge between the Matter protocol's data model and the user's OS-level networking logic.
+## Reference Cluster Implementations
+Instead of forcing the user to implement complex infrastructure clusters from scratch, the package should provide production-ready implementations for the "plumbing" clusters.
+
+* **Network Commissioning (Linux)**: Provide a built-in implementation for Linux (wrapping `nmcli` or `wpa_supplicant`) to handle Wi-Fi scanning and connection.
+* **General Commissioning**: Provide a full implementation handling the fail-safe timer, regulatory configuration, and commissioning lifecycle.
+* **Operational Credentials**: Provide a default file-based implementation for managing the Node Operational Certificate (NOC) chain and trusted roots.
 
 ## Setup Payload Generator
 * **URI & QR Code Helper**: Provide a utility function that takes the device's Passcode, Vendor ID, Product ID, and Discriminator, and outputs the standard Matter Setup Payload URI (`MT:...`). This makes it trivial for the user to render a pairing QR code or display a manual pairing code.

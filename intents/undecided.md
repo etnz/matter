@@ -7,7 +7,7 @@ This document details features that sit on the boundary between the protocol sta
 * **Investigation**: Can this be done in a highly efficient, entirely generic way that works across all possible data model paradigms without hindering the user's custom cluster logic?
 
 ## DAC/PAI/CD Certificate Manager
-* **Concept**: A ready-to-use `CertificateManager` implementation structured directly around reading standard DAC, PAI, and CD files/byte arrays.
+* **Concept**: A ready-to-use `CertificateManager` implementation structured directly around reading/writing standard DAC, PAI, and CD files/byte arrays.
 * **Investigation**: Does this align safely and perfectly with how actual manufacturers securely provision and store attestation materials in the factory? Will a file-based cert manager encourage bad security practices in production devices?
 
 ## BTP (Bluetooth Transport Protocol) Encapsulation
